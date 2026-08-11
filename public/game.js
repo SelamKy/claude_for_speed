@@ -102,9 +102,10 @@ const DRIVE = {
   accel: 15,
   brake: 34,
   coast: 5.5,
-  maxLateral: 10.5,         // m/s yanal hız tavanı
-  lateralAccel: 34,         // m/s² tuş basılıyken yanal ivme
-  lateralFriction: 7.5,     // 1/s tuş bırakılınca sönümleme (serbest duruş)
+  laneChangeSpeed: 10.5,    // m/s yanal hız tavanı
+  laneSnap: 6.2,            // şerit merkezine çeken yay katsayısı
+  steerResponse: 11,        // yanal hızın hedefe oturma hızı (1/s)
+  laneRepeatMs: 260,        // tuşu basılı tutunca şerit şerit kayma
 };
 
 /* Gövde animasyonu. Açılar radyan; hepsi tuş bırakılınca lerp ile nötre döner. */
@@ -246,7 +247,7 @@ const G = {
   raceTime: 0,
 
   me: {
-    distance: 0, speed: 0, x: 0, lane: 1,
+    distance: 0, speed: 0, x: 0, lane: 1, targetLane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
   },
@@ -260,6 +261,7 @@ const G = {
 };
 
 const input = { throttle: false, brakeKey: false, left: false, right: false };
+let laneRepeatAt = 0;
 
 /* ============================== renderer =============================== */
 
@@ -267,7 +269,7 @@ const canvas = $('scene');
 const renderer = new THREE.WebGLRenderer({
   canvas, antialias: true, powerPreference: 'high-performance', stencil: false,
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
 renderer.shadowMap.enabled = false;
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -279,9 +281,7 @@ scene.background = new THREE.Color(0x070b14);
 scene.fog = new THREE.Fog(0x070b14, 120, 460);
 
 const camera = new THREE.PerspectiveCamera(VIEW.fovBase, innerWidth / innerHeight, 0.4, 1400);
-camera.up.set(0, 1, 0);
-camera.rotation.order = 'YXZ';
-camera.position.set(0, 2.5, -6.0);
+camera.position.set(0, VIEW.camHeight, -VIEW.camBack);
 
 /* Stüdyo benzeri IBL — böylece boya ve krom gerçekten metal gibi okunur. */
 {
@@ -304,7 +304,6 @@ scene.add(rim);
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
   renderer.setSize(innerWidth, innerHeight);
 });
 
@@ -1283,7 +1282,7 @@ function hitFor(model) {
 
 function resetRace() {
   G.me = {
-    distance: 0, speed: 0, x: laneX(1), lane: 1,
+    distance: 0, speed: 0, x: laneX(1), lane: 1, targetLane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
   };
@@ -1306,13 +1305,6 @@ function resetRace() {
     rivalCar.visible = true;
   }
 
-  // Reset camera state so P2 never starts with a stale/backwards camera
-  camera.up.set(0, 1, 0);
-  camera.rotation.z = 0;
-  camera.position.set(0, 2.5, -6.0);
-  camera.lookAt(0, 1.2, 10.0);
-  shake = 0;
-
   el.progTotal.textContent = `/ ${CONFIG.finishDistance} m`;
   el.feed.innerHTML = '';
 }
@@ -1330,7 +1322,13 @@ const clock = new THREE.Clock();
 let fpsAcc = 0, fpsFrames = 0;
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3(0, VIEW.camHeight, -VIEW.camBack);
-let shake = 0; // kept for legacy crash-flash writes; no longer moves the camera
+let shake = 0;
+
+// Kamera her zaman sabit adımlarla güncellenir; düşük FPS'te büyük/dengesiz
+// dt sıçramaları shake/lerp hesaplarını titretmesin diye (frame-rate bağımsız).
+const CAM_FIXED_DT = 1 / 60;
+const CAM_MAX_CATCHUP = CAM_FIXED_DT * 5; // "spiral of death" birikmesini önler
+let camAccumulator = 0;
 
 function tickPlayer(dt) {
   const me = G.me;
@@ -1372,37 +1370,23 @@ function tickPlayer(dt) {
   me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, DRIVE.maxSpeed);
   me.distance += me.speed * dt;
 
-  /* --- yanal: tamamen serbest, sürekli direksiyon ----------------------- */
-  const steerDir = (input.right ? 1 : 0) - (input.left ? 1 : 0);  // +1 = sağ (+X), -1 = sol (-X)
-  if (steerDir !== 0) {
-    // tuş basılı: yanal hızı ivmelendir
-    me.lateral += steerDir * DRIVE.lateralAccel * dt;
-  } else {
-    // tuş bırakıldı: sürtünme ile yumuşakça dur (şerit merkezine çekme YOK)
-    me.lateral = THREE.MathUtils.damp(me.lateral, 0, DRIVE.lateralFriction, dt);
-    if (Math.abs(me.lateral) < 0.02) me.lateral = 0;
-  }
-  me.lateral = THREE.MathUtils.clamp(me.lateral, -DRIVE.maxLateral, DRIVE.maxLateral);
-
-  me.x += me.lateral * dt;
-
-  // asfalt sınırları: banketlerde sert durdur
-  const halfRoad = roadWidth() / 2 - CAR.halfWidth * 0.5;
-  if (me.x <= -halfRoad) { me.x = -halfRoad; if (me.lateral < 0) me.lateral = 0; }
-  else if (me.x >= halfRoad) { me.x = halfRoad; if (me.lateral > 0) me.lateral = 0; }
-
-  // sadece HUD pip'i için en yakın şerit (fiziği etkilemez)
-  me.lane = THREE.MathUtils.clamp(
-    Math.round(me.x / CONFIG.laneWidth + (CONFIG.laneCount - 1) / 2), 0, CONFIG.laneCount - 1
+  /* --- yanal: şerit merkezine yay, hız tavanıyla sınırlı ---------------- */
+  const goal = laneX(me.targetLane);
+  const delta = goal - me.x;
+  const desired = THREE.MathUtils.clamp(
+    delta * DRIVE.laneSnap, -DRIVE.laneChangeSpeed, DRIVE.laneChangeSpeed
   );
+  me.lateral = THREE.MathUtils.damp(me.lateral, desired, DRIVE.steerResponse, dt);
+  me.x += me.lateral * dt;
+  me.lane = Math.round(me.x / CONFIG.laneWidth + (CONFIG.laneCount - 1) / 2);
 
   /* --- direksiyon sinyali ----------------------------------------------
      Ağırlıklı olarak gerçek yanal hızdan, biraz da basılı tuştan gelir.
      Tuş bırakılıp araç şeridine oturunca yanal hız sıfırlanır, dolayısıyla
      sinyal de kendiliğinden nötre lerp'lenir.                            */
-  const keyInput = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  const keyInput = (input.left ? 1 : 0) - (input.right ? 1 : 0);
   const steerTarget = THREE.MathUtils.clamp(
-    (me.lateral / DRIVE.maxLateral) * 0.85 + keyInput * 0.25, -1, 1
+    (me.lateral / DRIVE.laneChangeSpeed) * 0.85 + keyInput * 0.25, -1, 1
   );
   const steerRate = Math.abs(steerTarget) > Math.abs(me.steer) ? BODY.steerAttack : BODY.steerRelease;
   me.steer = THREE.MathUtils.damp(me.steer, steerTarget, steerRate, dt);
@@ -1523,7 +1507,7 @@ function tickRival(dt) {
   const drift = (x - prevX) / Math.max(dt, 1e-3);
   G.rival.lateral = THREE.MathUtils.damp(G.rival.lateral, drift, 8, dt);
 
-  const steerTarget = THREE.MathUtils.clamp(G.rival.lateral / DRIVE.maxLateral, -1, 1);
+  const steerTarget = THREE.MathUtils.clamp(G.rival.lateral / DRIVE.laneChangeSpeed, -1, 1);
   G.rival.steer = THREE.MathUtils.damp(G.rival.steer, steerTarget, BODY.steerRelease, dt);
 
   rivalCar.position.set(x, 0, distance);
@@ -1542,25 +1526,26 @@ function tickCamera(dt) {
   const me = G.me;
   const speedK = THREE.MathUtils.clamp((me.speed - DRIVE.minSpeed) / (DRIVE.maxSpeed - DRIVE.minSpeed), 0, 1);
 
-  // Reference point: use playerCar if available, otherwise fall back to me state
-  const carX = playerCar ? playerCar.position.x : me.x;
-  const carY = playerCar ? playerCar.position.y : 0;
-  const carZ = playerCar ? playerCar.position.z : me.distance;
+  const want = new THREE.Vector3(
+    me.x * 0.72,
+    VIEW.camHeight + speedK * 0.35,
+    me.distance - VIEW.camBack - speedK * 1.8
+  );
+  camPos.lerp(want, 1 - Math.exp(-7 * dt));
 
-  // Chase cam: critically-damped tracking of the car mesh (no shake, no oscillation)
-  camTarget.set(carX, carY + 2.5, carZ - 6.0);
-  camera.position.lerp(camTarget, 1 - Math.exp(-15 * dt));
+  if (shake > 0) {
+    shake = Math.max(0, shake - dt * 1.6);
+    const s = shake * shake * 0.85;
+    camPos.x += (Math.random() - 0.5) * s;
+    camPos.y += (Math.random() - 0.5) * s;
+  }
+  camera.position.copy(camPos);
 
-  // Ensure upright orientation
-  camera.up.set(0, 1, 0);
+  camTarget.set(me.x * 0.35, 1.15, me.distance + VIEW.camLookAhead);
+  camera.lookAt(camTarget);
+  // Virajda kamerayı da azıcık yatır — dönüşü ekranda hissettirir.
+  camera.rotation.z = THREE.MathUtils.damp(camera.rotation.z, -me.steer * 0.028, 6, dt);
 
-  // Look forward along the track
-  camera.lookAt(carX, carY + 1.2, carZ + 10.0);
-
-  // Zero roll always
-  camera.rotation.z = 0;
-
-  // Speed-based FOV
   const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK;
   if (Math.abs(camera.fov - fov) > 0.05) {
     camera.fov = THREE.MathUtils.damp(camera.fov, fov, 6, dt);
@@ -1633,6 +1618,7 @@ function frame() {
 
   if (G.phase === 'racing' || G.phase === 'over') {
     G.raceTime = net.now() - G.startAt;
+    holdSteer(now);
     tickPlayer(dt);
     tickTraffic(G.raceTime, dt);
     checkCollisions(G.raceTime);
@@ -1643,9 +1629,13 @@ function frame() {
 
   updateRoad(G.me.distance);
 
-  // Tek çağrı: kamera exponential damping ile kendini stabilize eder,
-  // accumulator/shake kaynaklı frame-delta salınımı yok.
-  tickCamera(dt);
+  // Sabit zaman adımıyla kamera/shake güncelle; düşen FPS'te dt büyüyüp
+  // titreşimi büyütmesin diye adım sayısı sınırlı, kalan pay bir sonraki kareye taşınır.
+  camAccumulator = Math.min(camAccumulator + dt, CAM_MAX_CATCHUP);
+  while (camAccumulator >= CAM_FIXED_DT) {
+    tickCamera(CAM_FIXED_DT);
+    camAccumulator -= CAM_FIXED_DT;
+  }
 
   renderer.render(scene, camera);
 }
@@ -1685,13 +1675,26 @@ function restartAnim(node) {
 
 /* ================================ girdi ================================ */
 
+function laneShift(dir) {
+  if (G.phase !== 'racing' || G.me.crashed || G.me.finished) return;
+  G.me.targetLane = THREE.MathUtils.clamp(G.me.targetLane + dir, 0, CONFIG.laneCount - 1);
+  laneRepeatAt = performance.now() + DRIVE.laneRepeatMs;
+}
+
+/** Tuşu basılı tutmak şerit şerit kaydırır — tek tek tıklamak gerekmez. */
+function holdSteer(now) {
+  const dir = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+  if (!dir || now < laneRepeatAt) return;
+  laneShift(dir);
+}
+
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) return;
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = true;  break;
-    case 'KeyD': case 'ArrowRight': input.right = true; break;
+    case 'KeyA': case 'ArrowLeft':  input.left = true;  laneShift(1);  break;
+    case 'KeyD': case 'ArrowRight': input.right = true; laneShift(-1); break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
     case 'Space':
@@ -1703,7 +1706,7 @@ addEventListener('keydown', (e) => {
 
 addEventListener('keyup', (e) => {
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = false;  break;
+    case 'KeyA': case 'ArrowLeft':  input.left = false; break;
     case 'KeyD': case 'ArrowRight': input.right = false; break;
     case 'KeyW': case 'ArrowUp':    input.throttle = false; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = false; break;
@@ -1716,16 +1719,12 @@ canvas.addEventListener('touchstart', (e) => {
   touchStart = { x: e.touches[0].clientX, t: Date.now() };
   input.throttle = true;
 }, { passive: true });
-canvas.addEventListener('touchmove', (e) => {
-  if (!touchStart) return;
-  const dx = e.touches[0].clientX - touchStart.x;
-  input.left  = dx < -20;
-  input.right = dx > 20;
-}, { passive: true });
 canvas.addEventListener('touchend', (e) => {
   input.throttle = false;
-  input.left = false;
-  input.right = false;
+  if (!touchStart) return;
+  const dx = (e.changedTouches[0].clientX - touchStart.x);
+  if (Math.abs(dx) > 28) laneShift(-Math.sign(dx));
+  else if (Date.now() - touchStart.t < 220) laneShift(touchStart.x < innerWidth / 2 ? 1 : -1);
   touchStart = null;
 }, { passive: true });
 
@@ -2013,7 +2012,7 @@ async function boot() {
   // Ağır birleştirme adımından önce yükleme çubuğunun boyanmasına izin ver.
   await new Promise((r) => setTimeout(r, 30));
 
-  for (const k of LOAD_KEYS) {
+  for (const k of LOAD_KEYS) {  
     prefabs[k] = buildPrefab(gltfs[k], MODELS[k], { dropInterior: true });
   }
 
