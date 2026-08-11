@@ -1541,10 +1541,9 @@ function tickCamera(dt) {
   }
   camera.position.copy(camPos);
 
-  camTarget.set(me.x * 0.35, 1.15, me.distance + VIEW.camLookAhead);
+  camTarget.set(camPos.x, 1.15, me.distance + VIEW.camLookAhead);
   camera.lookAt(camTarget);
-  // Virajda kamerayı da azıcık yatır — dönüşü ekranda hissettirir.
-  camera.rotation.z = THREE.MathUtils.damp(camera.rotation.z, -me.steer * 0.028, 6, dt);
+  camera.rotation.z = 0;
 
   const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK;
   if (Math.abs(camera.fov - fov) > 0.05) {
@@ -1693,8 +1692,8 @@ addEventListener('keydown', (e) => {
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = true;  laneShift(1);  break;
-    case 'KeyD': case 'ArrowRight': input.right = true; laneShift(-1); break;
+    case 'KeyA': case 'ArrowLeft':  input.left = true;  laneShift(-1); break;
+    case 'KeyD': case 'ArrowRight': input.right = true; laneShift(1);  break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
     case 'Space':
