@@ -1305,6 +1305,11 @@ function resetRace() {
     rivalCar.visible = true;
   }
 
+  // Reset camera state so P2 never starts with a stale/backwards camera
+  camPos.set(0, VIEW.camHeight, -VIEW.camBack);
+  camTarget.set(0, 1.15, VIEW.camLookAhead);
+  shake = 0;
+
   el.progTotal.textContent = `/ ${CONFIG.finishDistance} m`;
   el.feed.innerHTML = '';
 }
@@ -1526,24 +1531,21 @@ function tickCamera(dt) {
   const me = G.me;
   const speedK = THREE.MathUtils.clamp((me.speed - DRIVE.minSpeed) / (DRIVE.maxSpeed - DRIVE.minSpeed), 0, 1);
 
+  // Traffic Rider style: camera locked at x=0, no lateral tracking
   const want = new THREE.Vector3(
-    me.x * 0.72,
+    0,
     VIEW.camHeight + speedK * 0.35,
     me.distance - VIEW.camBack - speedK * 1.8
   );
   camPos.lerp(want, 1 - Math.exp(-7 * dt));
 
-  if (shake > 0) {
-    shake = Math.max(0, shake - dt * 1.6);
-    const s = shake * shake * 0.85;
-    camPos.x += (Math.random() - 0.5) * s;
-    camPos.y += (Math.random() - 0.5) * s;
-  }
+  // No camera shake — keep position perfectly stable
   camera.position.copy(camPos);
 
-  camTarget.set(camPos.x, 1.15, me.distance + VIEW.camLookAhead);
+  // Look straight ahead along +Z, centered on road (x=0)
+  camTarget.set(0, 1.15, me.distance + VIEW.camLookAhead);
   camera.lookAt(camTarget);
-  camera.rotation.z = 0;
+  camera.rotation.z = 0;   // zero roll always
 
   const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK;
   if (Math.abs(camera.fov - fov) > 0.05) {
