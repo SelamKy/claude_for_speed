@@ -26,7 +26,8 @@ const CONFIG = {
   // Track geometry — sent to clients so both sides agree on the world.
   LANE_COUNT: 4,
   LANE_WIDTH: 3.5,
-  SPAWN_AHEAD: 250,          // metres ahead of the start line where traffic appears
+  MAX_SPEED: 109.7,          // m/s == 395 km/h (client top speed; mirrored in public/game.js)
+  SPAWN_AHEAD: 340,          // metres ahead of the start line where traffic appears
   SPAWN_JITTER: 45,          // random extra distance on top of SPAWN_AHEAD
   DESPAWN_BEHIND: 80,        // metres behind a car before the client may cull it
   FINISH_DISTANCE: 6000,     // metres to win
@@ -51,7 +52,7 @@ const CONFIG = {
   MAX_ACTIVE_TRAFFIC: 26,     // hard ceiling on cars alive in the play window
 
   // --- density floor: keep the view window ahead of the leader populated -----
-  ACTIVE_WINDOW: 340,         // metres ahead of the leader that count as "in view"
+  ACTIVE_WINDOW: 460,         // metres ahead of the leader that count as "in view"
   TARGET_ACTIVE_MIN: 6,       // top up until at least this many cars are in view
   TARGET_ACTIVE_MAX: 10,      // stop topping up at this many
 
@@ -71,7 +72,7 @@ const CONFIG = {
   STATE_RATE_LIMIT_MS: 20,   // ignore player updates faster than 50 Hz
   EMPTY_ROOM_TTL_MS: 60000,  // reap rooms nobody joined
   ROOM_SWEEP_MS: 30000,
-  MAX_SPEED_SANITY: 120,     // m/s — used to reject impossible progress reports
+  MAX_SPEED_SANITY: 130,     // m/s — used to reject impossible progress reports
 };
 
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1

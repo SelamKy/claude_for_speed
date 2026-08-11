@@ -97,7 +97,7 @@ const CAR = {
 
 const DRIVE = {
   startSpeed: 42,           // yeşil ışıkta m/s
-  maxSpeed: 82,
+  maxSpeed: 109.7,          // 395 km/h
   minSpeed: 8,
   accel: 15,
   brake: 34,
@@ -1364,7 +1364,13 @@ function tickPlayer(dt) {
   }
 
   /* --- boyuna ---------------------------------------------------------- */
-  if (input.throttle) me.speed += DRIVE.accel * dt;
+  if (input.throttle) {
+    // 300 km/h (83.3 m/s) üstünde aerodinamik direnç: tırmanış kademeli.
+    const drag = me.speed > 83.3
+      ? Math.max(0.12, (DRIVE.maxSpeed - me.speed) / 26.4)
+      : 1;
+    me.speed += DRIVE.accel * drag * dt;
+  }
   else if (input.brakeKey) me.speed -= DRIVE.brake * dt;
   else me.speed -= DRIVE.coast * dt;
   me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, DRIVE.maxSpeed);
