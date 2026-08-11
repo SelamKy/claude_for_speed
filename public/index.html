@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<meta name="theme-color" content="#05070d" />
+<title>Traffic Duel — 2 Player Highway Racer</title>
+<link rel="preconnect" href="https://unpkg.com" />
+<link rel="stylesheet" href="/style.css" />
+<link rel="preload" as="fetch" href="/models/bmw_m3_competition.glb" crossorigin />
+</head>
+<body>
+
+  <!-- ============================ 3D VIEWPORT ============================ -->
+  <canvas id="scene"></canvas>
+  <div id="vignette" aria-hidden="true"></div>
+  <div id="speedlines" aria-hidden="true"></div>
+
+  <!-- ============================== LOADING ============================== -->
+  <section id="loading" class="screen">
+    <div class="loader-box">
+      <div class="logo">
+        <span class="logo-main">TRAFFIC</span><span class="logo-accent">DUEL</span>
+      </div>
+      <div class="bar"><i id="load-bar"></i></div>
+      <p id="load-label" class="muted">Warming up the engines…</p>
+    </div>
+  </section>
+
+  <!-- =============================== LOBBY =============================== -->
+  <section id="lobby" class="screen hidden">
+    <div class="panel lobby-panel">
+
+      <header class="lobby-head">
+        <div class="logo">
+          <span class="logo-main">TRAFFIC</span><span class="logo-accent">DUEL</span>
+        </div>
+        <p class="tagline">Two cars. Four lanes. One survivor.</p>
+      </header>
+
+      <!-- --- entry: create or join --- -->
+      <div id="lobby-entry" class="lobby-stage">
+        <button id="btn-create" class="btn btn-primary btn-lg">
+          <span class="btn-glyph">▶</span> Create a race
+        </button>
+
+        <div class="divider"><span>or join a friend</span></div>
+
+        <form id="join-form" class="join-row" autocomplete="off">
+          <input id="join-code" class="input code-input" maxlength="6" spellcheck="false"
+                 placeholder="XYZ123" aria-label="Room code" />
+          <button id="btn-join" type="submit" class="btn">Join</button>
+        </form>
+      </div>
+
+      <!-- --- room: invite + ready --- -->
+      <div id="lobby-room" class="lobby-stage hidden">
+        <div class="room-code-row">
+          <span class="label">Room code</span>
+          <span id="room-code" class="room-code">------</span>
+        </div>
+
+        <div class="invite-row">
+          <input id="invite-link" class="input invite-input" readonly aria-label="Invite link" />
+          <button id="btn-copy" class="btn btn-ghost" title="Copy invite link">
+            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+              <path d="M9 9V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-4" />
+              <rect x="3" y="9" width="12" height="12" rx="2" />
+            </svg>
+            <span id="copy-text">Copy</span>
+          </button>
+        </div>
+        <p class="hint">Send that link to your opponent — it drops them straight into this room.</p>
+
+        <ul id="player-list" class="player-list">
+          <li class="player-slot empty" data-slot="0"><span class="dot"></span><span class="pname">Waiting…</span><span class="pstate"></span></li>
+          <li class="player-slot empty" data-slot="1"><span class="dot"></span><span class="pname">Waiting…</span><span class="pstate"></span></li>
+        </ul>
+
+        <button id="btn-ready" class="btn btn-primary btn-lg" disabled>Ready up</button>
+        <button id="btn-leave" class="btn btn-link">Leave room</button>
+        <p id="lobby-status" class="muted status">Waiting for an opponent…</p>
+      </div>
+
+      <footer class="controls-legend">
+        <span><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> change lane</span>
+        <span><kbd>W</kbd> throttle</span>
+        <span><kbd>S</kbd> brake</span>
+      </footer>
+    </div>
+  </section>
+
+  <!-- ============================= COUNTDOWN ============================= -->
+  <section id="countdown" class="screen overlay hidden">
+    <div class="lights">
+      <i class="light"></i><i class="light"></i><i class="light"></i>
+    </div>
+    <div id="count-number" class="count-number">3</div>
+    <p class="count-sub">Get ready</p>
+  </section>
+
+  <!-- ================================ HUD ================================ -->
+  <div id="hud" class="hidden">
+    <div class="hud-top">
+      <div class="hud-card progress-card">
+        <div class="progress-head">
+          <span id="prog-distance">0 m</span>
+          <span id="prog-total" class="muted">/ 6000 m</span>
+        </div>
+        <div class="track">
+          <i id="track-you" class="pip you" title="You"></i>
+          <i id="track-rival" class="pip rival" title="Opponent"></i>
+        </div>
+        <div id="gap" class="gap">—</div>
+      </div>
+
+      <div class="hud-card net-card">
+        <div class="net-row"><span class="muted">PING</span><span id="ping">--</span><span class="unit">ms</span></div>
+        <div class="net-row"><span class="muted">FPS</span><span id="fps">--</span></div>
+        <div class="net-row"><span class="muted">CARS</span><span id="traffic-count">0</span></div>
+      </div>
+    </div>
+
+    <div class="hud-bottom">
+      <div class="speedo">
+        <svg viewBox="0 0 200 120" class="speedo-arc" aria-hidden="true">
+          <path class="arc-bg" d="M20 110 A 80 80 0 0 1 180 110" />
+          <path id="arc-fill" class="arc-fill" d="M20 110 A 80 80 0 0 1 180 110" />
+        </svg>
+        <div class="speed-value"><span id="speed">0</span><small>km/h</small></div>
+      </div>
+      <div id="lane-pips" class="lane-pips">
+        <i></i><i></i><i></i><i></i>
+      </div>
+    </div>
+
+    <div id="flash" class="flash"></div>
+    <div id="event-feed" class="event-feed"></div>
+  </div>
+
+  <!-- ============================== GAME OVER ============================= -->
+  <section id="gameover" class="screen overlay hidden">
+    <div class="panel result-panel">
+      <h2 id="result-title" class="result-title">RACE OVER</h2>
+      <p id="result-sub" class="muted"></p>
+      <ol id="result-list" class="result-list"></ol>
+      <div class="result-actions">
+        <button id="btn-rematch" class="btn btn-primary btn-lg">Rematch</button>
+        <button id="btn-quit" class="btn btn-ghost">Back to lobby</button>
+      </div>
+      <p id="rematch-status" class="muted status"></p>
+    </div>
+  </section>
+
+  <!-- =============================== TOASTS ============================== -->
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+
+  <!-- ============================== SCRIPTS ============================== -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.161.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.161.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="/game.js"></script>
+  <noscript><p class="noscript">Traffic Duel needs JavaScript and WebGL.</p></noscript>
+</body>
+</html>
