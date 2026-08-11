@@ -1332,13 +1332,7 @@ const clock = new THREE.Clock();
 let fpsAcc = 0, fpsFrames = 0;
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3(0, VIEW.camHeight, -VIEW.camBack);
-let shake = 0;
-
-// Kamera her zaman sabit adımlarla güncellenir; düşük FPS'te büyük/dengesiz
-// dt sıçramaları shake/lerp hesaplarını titretmesin diye (frame-rate bağımsız).
-const CAM_FIXED_DT = 1 / 60;
-const CAM_MAX_CATCHUP = CAM_FIXED_DT * 5; // "spiral of death" birikmesini önler
-let camAccumulator = 0;
+let shake = 0; // kept for legacy crash-flash writes; no longer moves the camera
 
 function tickPlayer(dt) {
   const me = G.me;
@@ -1541,8 +1535,9 @@ function tickCamera(dt) {
   const carY = playerCar ? playerCar.position.y : 0;
   const carZ = playerCar ? playerCar.position.z : me.distance;
 
-  // Chase cam: behind and above the car
-  camera.position.set(carX, carY + 2.5, carZ - 6.0);
+  // Chase cam: critically-damped tracking of the car mesh (no shake, no oscillation)
+  camTarget.set(carX, carY + 2.5, carZ - 6.0);
+  camera.position.lerp(camTarget, 1 - Math.exp(-15 * dt));
 
   // Ensure upright orientation
   camera.up.set(0, 1, 0);
@@ -1637,13 +1632,9 @@ function frame() {
 
   updateRoad(G.me.distance);
 
-  // Sabit zaman adımıyla kamera/shake güncelle; düşen FPS'te dt büyüyüp
-  // titreşimi büyütmesin diye adım sayısı sınırlı, kalan pay bir sonraki kareye taşınır.
-  camAccumulator = Math.min(camAccumulator + dt, CAM_MAX_CATCHUP);
-  while (camAccumulator >= CAM_FIXED_DT) {
-    tickCamera(CAM_FIXED_DT);
-    camAccumulator -= CAM_FIXED_DT;
-  }
+  // Tek çağrı: kamera exponential damping ile kendini stabilize eder,
+  // accumulator/shake kaynaklı frame-delta salınımı yok.
+  tickCamera(dt);
 
   renderer.render(scene, camera);
 }
@@ -1696,8 +1687,9 @@ addEventListener('keydown', (e) => {
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = true;  break;
-    case 'KeyD': case 'ArrowRight': input.right = true; break;
+    // Inverted mapping: chase cam faces +Z, so screen-left is +X lateral.
+    case 'KeyA': case 'ArrowLeft':  input.right = true; break;
+    case 'KeyD': case 'ArrowRight': input.left = true;  break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
     case 'Space':
@@ -1709,8 +1701,8 @@ addEventListener('keydown', (e) => {
 
 addEventListener('keyup', (e) => {
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = false; break;
-    case 'KeyD': case 'ArrowRight': input.right = false; break;
+    case 'KeyA': case 'ArrowLeft':  input.right = false; break;
+    case 'KeyD': case 'ArrowRight': input.left = false; break;
     case 'KeyW': case 'ArrowUp':    input.throttle = false; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = false; break;
   }
@@ -1725,8 +1717,8 @@ canvas.addEventListener('touchstart', (e) => {
 canvas.addEventListener('touchmove', (e) => {
   if (!touchStart) return;
   const dx = e.touches[0].clientX - touchStart.x;
-  input.left = dx < -20;
-  input.right = dx > 20;
+  input.right = dx < -20;
+  input.left = dx > 20;
 }, { passive: true });
 canvas.addEventListener('touchend', (e) => {
   input.throttle = false;
