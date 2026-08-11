@@ -209,6 +209,7 @@ const net = {
   offset: 0,          // serverNow ≈ Date.now() + offset
   bestRtt: Infinity,
   ping: 0,
+  synced: false,       // ilk örnekten sonra true — sonraki düzeltmeler yumuşatılır
   now: () => Date.now() + net.offset,
 };
 
@@ -221,7 +222,11 @@ function syncClock() {
     // Offseti gördüğümüz en az gecikmeli örnekten koru.
     if (rtt <= net.bestRtt) {
       net.bestRtt = rtt;
-      net.offset = res.serverTime + rtt / 2 - Date.now();
+      const measured = res.serverTime + rtt / 2 - Date.now();
+      // Sert atama yerine yumuşak düzeltme: trafik/rakip zaman çizgisi ani
+      // ofset sıçramalarıyla ileri/geri ışınlanmasın (teleport/rubber-band önlemi).
+      net.offset = net.synced ? net.offset + (measured - net.offset) * 0.2 : measured;
+      net.synced = true;
     }
     // En iyi örneği yavaşça unut ki rota değişirse saat yeniden kilitlensin.
     net.bestRtt = net.bestRtt * 1.05 + 1;
@@ -1378,7 +1383,7 @@ function tickPlayer(dt) {
      Ağırlıklı olarak gerçek yanal hızdan, biraz da basılı tuştan gelir.
      Tuş bırakılıp araç şeridine oturunca yanal hız sıfırlanır, dolayısıyla
      sinyal de kendiliğinden nötre lerp'lenir.                            */
-  const keyInput = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  const keyInput = (input.left ? 1 : 0) - (input.right ? 1 : 0);
   const steerTarget = THREE.MathUtils.clamp(
     (me.lateral / DRIVE.laneChangeSpeed) * 0.85 + keyInput * 0.25, -1, 1
   );
@@ -1676,7 +1681,7 @@ function laneShift(dir) {
 
 /** Tuşu basılı tutmak şerit şerit kaydırır — tek tek tıklamak gerekmez. */
 function holdSteer(now) {
-  const dir = (input.right ? 1 : 0) - (input.left ? 1 : 0);
+  const dir = (input.left ? 1 : 0) - (input.right ? 1 : 0);
   if (!dir || now < laneRepeatAt) return;
   laneShift(dir);
 }
@@ -1686,8 +1691,8 @@ addEventListener('keydown', (e) => {
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = true;  laneShift(-1); break;
-    case 'KeyD': case 'ArrowRight': input.right = true; laneShift(1);  break;
+    case 'KeyA': case 'ArrowLeft':  input.left = true;  laneShift(1);  break;
+    case 'KeyD': case 'ArrowRight': input.right = true; laneShift(-1); break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
     case 'Space':
@@ -1716,8 +1721,8 @@ canvas.addEventListener('touchend', (e) => {
   input.throttle = false;
   if (!touchStart) return;
   const dx = (e.changedTouches[0].clientX - touchStart.x);
-  if (Math.abs(dx) > 28) laneShift(Math.sign(dx));
-  else if (Date.now() - touchStart.t < 220) laneShift(touchStart.x < innerWidth / 2 ? -1 : 1);
+  if (Math.abs(dx) > 28) laneShift(-Math.sign(dx));
+  else if (Date.now() - touchStart.t < 220) laneShift(touchStart.x < innerWidth / 2 ? 1 : -1);
   touchStart = null;
 }, { passive: true });
 
@@ -1783,6 +1788,7 @@ function joinRoom(code) {
     }
     G.youId = res.you.id;
     net.offset = res.serverTime - Date.now();
+    net.synced = true;
     renderRoom(res.room);
     enterRoomView();
     history.replaceState(null, '', res.inviteUrl);
@@ -1887,6 +1893,7 @@ socket.on('match:countdown', (data) => {
   G.startAt = data.startAt;
   // Bu paketle gelen zaman çiftini taze bir saat düzeltmesi olarak kabul et.
   net.offset = data.serverTime - Date.now();
+  net.synced = true;
 
   buildRoad();
   resetRace();
