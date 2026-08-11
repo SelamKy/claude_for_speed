@@ -102,10 +102,9 @@ const DRIVE = {
   accel: 15,
   brake: 34,
   coast: 5.5,
-  laneChangeSpeed: 10.5,    // m/s yanal hız tavanı
-  laneSnap: 6.2,            // şerit merkezine çeken yay katsayısı
-  steerResponse: 11,        // yanal hızın hedefe oturma hızı (1/s)
-  laneRepeatMs: 260,        // tuşu basılı tutunca şerit şerit kayma
+  maxLateral: 10.5,         // m/s yanal hız tavanı
+  lateralAccel: 34,         // m/s² tuş basılıyken yanal ivme
+  lateralFriction: 7.5,     // 1/s tuş bırakılınca sönümleme (serbest duruş)
 };
 
 /* Gövde animasyonu. Açılar radyan; hepsi tuş bırakılınca lerp ile nötre döner. */
@@ -247,7 +246,7 @@ const G = {
   raceTime: 0,
 
   me: {
-    distance: 0, speed: 0, x: 0, lane: 1, targetLane: 1,
+    distance: 0, speed: 0, x: 0, lane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
   },
@@ -261,7 +260,6 @@ const G = {
 };
 
 const input = { throttle: false, brakeKey: false, left: false, right: false };
-let laneRepeatAt = 0;
 
 /* ============================== renderer =============================== */
 
@@ -1285,7 +1283,7 @@ function hitFor(model) {
 
 function resetRace() {
   G.me = {
-    distance: 0, speed: 0, x: laneX(1), lane: 1, targetLane: 1,
+    distance: 0, speed: 0, x: laneX(1), lane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
   };
@@ -1374,15 +1372,29 @@ function tickPlayer(dt) {
   me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, DRIVE.maxSpeed);
   me.distance += me.speed * dt;
 
-  /* --- yanal: smooth continuous steering, bounded by track edges -------- */
-  const steerDir = (input.right ? 1 : 0) - (input.left ? 1 : 0);  // +1 = right (+X), -1 = left (-X)
-  const desired = steerDir * DRIVE.laneChangeSpeed;
-  me.lateral = THREE.MathUtils.damp(me.lateral, desired, DRIVE.steerResponse, dt);
+  /* --- yanal: tamamen serbest, sürekli direksiyon ----------------------- */
+  const steerDir = (input.right ? 1 : 0) - (input.left ? 1 : 0);  // +1 = sağ (+X), -1 = sol (-X)
+  if (steerDir !== 0) {
+    // tuş basılı: yanal hızı ivmelendir
+    me.lateral += steerDir * DRIVE.lateralAccel * dt;
+  } else {
+    // tuş bırakıldı: sürtünme ile yumuşakça dur (şerit merkezine çekme YOK)
+    me.lateral = THREE.MathUtils.damp(me.lateral, 0, DRIVE.lateralFriction, dt);
+    if (Math.abs(me.lateral) < 0.02) me.lateral = 0;
+  }
+  me.lateral = THREE.MathUtils.clamp(me.lateral, -DRIVE.maxLateral, DRIVE.maxLateral);
+
   me.x += me.lateral * dt;
-  // Clamp within track edges (half road width minus car half width)
+
+  // asfalt sınırları: banketlerde sert durdur
   const halfRoad = roadWidth() / 2 - CAR.halfWidth * 0.5;
-  me.x = THREE.MathUtils.clamp(me.x, -halfRoad, halfRoad);
-  me.lane = Math.round(me.x / CONFIG.laneWidth + (CONFIG.laneCount - 1) / 2);
+  if (me.x <= -halfRoad) { me.x = -halfRoad; if (me.lateral < 0) me.lateral = 0; }
+  else if (me.x >= halfRoad) { me.x = halfRoad; if (me.lateral > 0) me.lateral = 0; }
+
+  // sadece HUD pip'i için en yakın şerit (fiziği etkilemez)
+  me.lane = THREE.MathUtils.clamp(
+    Math.round(me.x / CONFIG.laneWidth + (CONFIG.laneCount - 1) / 2), 0, CONFIG.laneCount - 1
+  );
 
   /* --- direksiyon sinyali ----------------------------------------------
      Ağırlıklı olarak gerçek yanal hızdan, biraz da basılı tuştan gelir.
@@ -1390,7 +1402,7 @@ function tickPlayer(dt) {
      sinyal de kendiliğinden nötre lerp'lenir.                            */
   const keyInput = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   const steerTarget = THREE.MathUtils.clamp(
-    (me.lateral / DRIVE.laneChangeSpeed) * 0.85 + keyInput * 0.25, -1, 1
+    (me.lateral / DRIVE.maxLateral) * 0.85 + keyInput * 0.25, -1, 1
   );
   const steerRate = Math.abs(steerTarget) > Math.abs(me.steer) ? BODY.steerAttack : BODY.steerRelease;
   me.steer = THREE.MathUtils.damp(me.steer, steerTarget, steerRate, dt);
@@ -1511,7 +1523,7 @@ function tickRival(dt) {
   const drift = (x - prevX) / Math.max(dt, 1e-3);
   G.rival.lateral = THREE.MathUtils.damp(G.rival.lateral, drift, 8, dt);
 
-  const steerTarget = THREE.MathUtils.clamp(G.rival.lateral / DRIVE.laneChangeSpeed, -1, 1);
+  const steerTarget = THREE.MathUtils.clamp(G.rival.lateral / DRIVE.maxLateral, -1, 1);
   G.rival.steer = THREE.MathUtils.damp(G.rival.steer, steerTarget, BODY.steerRelease, dt);
 
   rivalCar.position.set(x, 0, distance);
@@ -1621,7 +1633,6 @@ function frame() {
 
   if (G.phase === 'racing' || G.phase === 'over') {
     G.raceTime = net.now() - G.startAt;
-    holdSteer(now);
     tickPlayer(dt);
     tickTraffic(G.raceTime, dt);
     checkCollisions(G.raceTime);
@@ -1674,22 +1685,13 @@ function restartAnim(node) {
 
 /* ================================ girdi ================================ */
 
-function laneShift(dir) {
-  // Kept for touch compatibility; no-op now (smooth steering handles movement)
-}
-
-/** No-op — smooth analog steering is handled in tickPlayer directly. */
-function holdSteer(now) {
-}
-
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) return;
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
-    // Inverted mapping: chase cam faces +Z, so screen-left is +X lateral.
-    case 'KeyA': case 'ArrowLeft':  input.right = true; break;
-    case 'KeyD': case 'ArrowRight': input.left = true;  break;
+    case 'KeyA': case 'ArrowLeft':  input.left = true;  break;
+    case 'KeyD': case 'ArrowRight': input.right = true; break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
     case 'Space':
@@ -1701,8 +1703,8 @@ addEventListener('keydown', (e) => {
 
 addEventListener('keyup', (e) => {
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.right = false; break;
-    case 'KeyD': case 'ArrowRight': input.left = false; break;
+    case 'KeyA': case 'ArrowLeft':  input.left = false;  break;
+    case 'KeyD': case 'ArrowRight': input.right = false; break;
     case 'KeyW': case 'ArrowUp':    input.throttle = false; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = false; break;
   }
@@ -1717,8 +1719,8 @@ canvas.addEventListener('touchstart', (e) => {
 canvas.addEventListener('touchmove', (e) => {
   if (!touchStart) return;
   const dx = e.touches[0].clientX - touchStart.x;
-  input.right = dx < -20;
-  input.left = dx > 20;
+  input.left  = dx < -20;
+  input.right = dx > 20;
 }, { passive: true });
 canvas.addEventListener('touchend', (e) => {
   input.throttle = false;
