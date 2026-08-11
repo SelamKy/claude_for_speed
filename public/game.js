@@ -269,7 +269,7 @@ const canvas = $('scene');
 const renderer = new THREE.WebGLRenderer({
   canvas, antialias: true, powerPreference: 'high-performance', stencil: false,
 });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
 renderer.shadowMap.enabled = false;
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
@@ -306,6 +306,7 @@ scene.add(rim);
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2.0));
   renderer.setSize(innerWidth, innerHeight);
 });
 
@@ -1379,21 +1380,21 @@ function tickPlayer(dt) {
   me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, DRIVE.maxSpeed);
   me.distance += me.speed * dt;
 
-  /* --- yanal: şerit merkezine yay, hız tavanıyla sınırlı ---------------- */
-  const goal = laneX(me.targetLane);
-  const delta = goal - me.x;
-  const desired = THREE.MathUtils.clamp(
-    delta * DRIVE.laneSnap, -DRIVE.laneChangeSpeed, DRIVE.laneChangeSpeed
-  );
+  /* --- yanal: smooth continuous steering, bounded by track edges -------- */
+  const steerDir = (input.right ? 1 : 0) - (input.left ? 1 : 0);  // +1 = right (+X), -1 = left (-X)
+  const desired = steerDir * DRIVE.laneChangeSpeed;
   me.lateral = THREE.MathUtils.damp(me.lateral, desired, DRIVE.steerResponse, dt);
   me.x += me.lateral * dt;
+  // Clamp within track edges (half road width minus car half width)
+  const halfRoad = roadWidth() / 2 - CAR.halfWidth * 0.5;
+  me.x = THREE.MathUtils.clamp(me.x, -halfRoad, halfRoad);
   me.lane = Math.round(me.x / CONFIG.laneWidth + (CONFIG.laneCount - 1) / 2);
 
   /* --- direksiyon sinyali ----------------------------------------------
      Ağırlıklı olarak gerçek yanal hızdan, biraz da basılı tuştan gelir.
      Tuş bırakılıp araç şeridine oturunca yanal hız sıfırlanır, dolayısıyla
      sinyal de kendiliğinden nötre lerp'lenir.                            */
-  const keyInput = (input.left ? 1 : 0) - (input.right ? 1 : 0);
+  const keyInput = (input.right ? 1 : 0) - (input.left ? 1 : 0);
   const steerTarget = THREE.MathUtils.clamp(
     (me.lateral / DRIVE.laneChangeSpeed) * 0.85 + keyInput * 0.25, -1, 1
   );
@@ -1683,16 +1684,11 @@ function restartAnim(node) {
 /* ================================ girdi ================================ */
 
 function laneShift(dir) {
-  if (G.phase !== 'racing' || G.me.crashed || G.me.finished) return;
-  G.me.targetLane = THREE.MathUtils.clamp(G.me.targetLane + dir, 0, CONFIG.laneCount - 1);
-  laneRepeatAt = performance.now() + DRIVE.laneRepeatMs;
+  // Kept for touch compatibility; no-op now (smooth steering handles movement)
 }
 
-/** Tuşu basılı tutmak şerit şerit kaydırır — tek tek tıklamak gerekmez. */
+/** No-op — smooth analog steering is handled in tickPlayer directly. */
 function holdSteer(now) {
-  const dir = (input.left ? 1 : 0) - (input.right ? 1 : 0);
-  if (!dir || now < laneRepeatAt) return;
-  laneShift(dir);
 }
 
 addEventListener('keydown', (e) => {
@@ -1700,8 +1696,8 @@ addEventListener('keydown', (e) => {
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
-    case 'KeyA': case 'ArrowLeft':  input.left = true;  laneShift(-1); break;
-    case 'KeyD': case 'ArrowRight': input.right = true; laneShift(1);  break;
+    case 'KeyA': case 'ArrowLeft':  input.left = true;  break;
+    case 'KeyD': case 'ArrowRight': input.right = true; break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
     case 'Space':
@@ -1726,12 +1722,16 @@ canvas.addEventListener('touchstart', (e) => {
   touchStart = { x: e.touches[0].clientX, t: Date.now() };
   input.throttle = true;
 }, { passive: true });
+canvas.addEventListener('touchmove', (e) => {
+  if (!touchStart) return;
+  const dx = e.touches[0].clientX - touchStart.x;
+  input.left = dx < -20;
+  input.right = dx > 20;
+}, { passive: true });
 canvas.addEventListener('touchend', (e) => {
   input.throttle = false;
-  if (!touchStart) return;
-  const dx = (e.changedTouches[0].clientX - touchStart.x);
-  if (Math.abs(dx) > 28) laneShift(-Math.sign(dx));
-  else if (Date.now() - touchStart.t < 220) laneShift(touchStart.x < innerWidth / 2 ? 1 : -1);
+  input.left = false;
+  input.right = false;
   touchStart = null;
 }, { passive: true });
 
