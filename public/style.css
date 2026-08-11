@@ -222,6 +222,11 @@ html, body {
   border-top: 1px solid rgba(255, 255, 255, 0.07);
   color: var(--muted); font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase;
 }
+.credit-line {
+  margin-top: 10px; text-align: center;
+  color: var(--muted); font-size: 10.5px; letter-spacing: 0.08em;
+  opacity: 0.6;
+}
 kbd {
   display: inline-block; min-width: 22px; text-align: center;
   background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.14);

@@ -1318,6 +1318,12 @@ const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3(0, VIEW.camHeight, -VIEW.camBack);
 let shake = 0;
 
+// Kamera her zaman sabit adımlarla güncellenir; düşük FPS'te büyük/dengesiz
+// dt sıçramaları shake/lerp hesaplarını titretmesin diye (frame-rate bağımsız).
+const CAM_FIXED_DT = 1 / 60;
+const CAM_MAX_CATCHUP = CAM_FIXED_DT * 5; // "spiral of death" birikmesini önler
+let camAccumulator = 0;
+
 function tickPlayer(dt) {
   const me = G.me;
 
@@ -1615,7 +1621,15 @@ function frame() {
   }
 
   updateRoad(G.me.distance);
-  tickCamera(dt);
+
+  // Sabit zaman adımıyla kamera/shake güncelle; düşen FPS'te dt büyüyüp
+  // titreşimi büyütmesin diye adım sayısı sınırlı, kalan pay bir sonraki kareye taşınır.
+  camAccumulator = Math.min(camAccumulator + dt, CAM_MAX_CATCHUP);
+  while (camAccumulator >= CAM_FIXED_DT) {
+    tickCamera(CAM_FIXED_DT);
+    camAccumulator -= CAM_FIXED_DT;
+  }
+
   renderer.render(scene, camera);
 }
 
