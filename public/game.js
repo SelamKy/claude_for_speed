@@ -1526,21 +1526,24 @@ function tickCamera(dt) {
   const me = G.me;
   const speedK = THREE.MathUtils.clamp((me.speed - DRIVE.minSpeed) / (DRIVE.maxSpeed - DRIVE.minSpeed), 0, 1);
 
-  // Kamerayı doğrudan arabanın X koordinatına tam arkasına al (açı yapmaz)
   const want = new THREE.Vector3(
-    me.x,
-    VIEW.camHeight + speedK * 0.25,
-    me.distance - VIEW.camBack - speedK * 1.5
+    me.x * 0.72,
+    VIEW.camHeight + speedK * 0.35,
+    me.distance - VIEW.camBack - speedK * 1.8
   );
-  camPos.lerp(want, 1 - Math.exp(-15 * dt));
+  camPos.lerp(want, 1 - Math.exp(-7 * dt));
+
+  if (shake > 0) {
+    shake = Math.max(0, shake - dt * 1.6);
+    const s = shake * shake * 0.85;
+    camPos.x += (Math.random() - 0.5) * s;
+    camPos.y += (Math.random() - 0.5) * s;
+  }
   camera.position.copy(camPos);
 
-  // Doğrudan arabanın tam önüne baksın (sağa-sola çapraz bakış yok)
-  camTarget.set(me.x, 1.15, me.distance + VIEW.camLookAhead);
+  camTarget.set(me.x * 0.35, 1.15, me.distance + VIEW.camLookAhead);
+  camera.up.set(0, 1, 0);
   camera.lookAt(camTarget);
-
-  // Yan yatmayı ve eğimi kesin olarak sıfırla
-  camera.rotation.z = 0;
 
   const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK;
   if (Math.abs(camera.fov - fov) > 0.05) {
