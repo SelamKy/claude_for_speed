@@ -282,7 +282,8 @@ scene.fog = new THREE.Fog(0x070b14, 120, 460);
 
 const camera = new THREE.PerspectiveCamera(VIEW.fovBase, innerWidth / innerHeight, 0.4, 1400);
 camera.up.set(0, 1, 0);
-camera.position.set(0, VIEW.camHeight, -VIEW.camBack);
+camera.rotation.order = 'YXZ';
+camera.position.set(0, 2.5, -6.0);
 
 /* Stüdyo benzeri IBL — böylece boya ve krom gerçekten metal gibi okunur. */
 {
@@ -1307,8 +1308,10 @@ function resetRace() {
   }
 
   // Reset camera state so P2 never starts with a stale/backwards camera
-  camPos.set(0, VIEW.camHeight, -VIEW.camBack);
-  camTarget.set(0, 1.15, VIEW.camLookAhead);
+  camera.up.set(0, 1, 0);
+  camera.rotation.z = 0;
+  camera.position.set(0, 2.5, -6.0);
+  camera.lookAt(0, 1.2, 10.0);
   shake = 0;
 
   el.progTotal.textContent = `/ ${CONFIG.finishDistance} m`;
@@ -1532,23 +1535,24 @@ function tickCamera(dt) {
   const me = G.me;
   const speedK = THREE.MathUtils.clamp((me.speed - DRIVE.minSpeed) / (DRIVE.maxSpeed - DRIVE.minSpeed), 0, 1);
 
-  // Traffic Rider style: camera locked at x=0, no lateral tracking
-  const want = new THREE.Vector3(
-    0,
-    VIEW.camHeight + speedK * 0.35,
-    me.distance - VIEW.camBack - speedK * 1.8
-  );
-  camPos.lerp(want, 1 - Math.exp(-7 * dt));
+  // Reference point: use playerCar if available, otherwise fall back to me state
+  const carX = playerCar ? playerCar.position.x : me.x;
+  const carY = playerCar ? playerCar.position.y : 0;
+  const carZ = playerCar ? playerCar.position.z : me.distance;
 
-  // No camera shake — keep position perfectly stable
-  camera.position.copy(camPos);
+  // Chase cam: behind and above the car
+  camera.position.set(carX, carY + 2.5, carZ - 6.0);
 
-  // Look straight ahead along +Z, centered on road (x=0)
-  camTarget.set(0, 1.15, me.distance + VIEW.camLookAhead);
+  // Ensure upright orientation
   camera.up.set(0, 1, 0);
-  camera.lookAt(camTarget);
-  camera.rotation.z = 0;   // zero roll always
 
+  // Look forward along the track
+  camera.lookAt(carX, carY + 1.2, carZ + 10.0);
+
+  // Zero roll always
+  camera.rotation.z = 0;
+
+  // Speed-based FOV
   const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK;
   if (Math.abs(camera.fov - fov) > 0.05) {
     camera.fov = THREE.MathUtils.damp(camera.fov, fov, 6, dt);
