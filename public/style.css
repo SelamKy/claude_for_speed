@@ -273,6 +273,11 @@ kbd {
   backdrop-filter: blur(8px);
 }
 .progress-card { flex: 1; }
+/* Türkçe HUD etiketleri (Mesafe (m) / Hız (km/s) / Gecikme (Ping)) */
+.card-label {
+  color: var(--muted); font-size: 10px; letter-spacing: 0.18em;
+  text-transform: uppercase; margin-bottom: 4px;
+}
 .progress-head { display: flex; justify-content: space-between; align-items: baseline;
                  font-family: var(--mono); font-size: 15px; font-weight: 700; letter-spacing: 0.04em; }
 .progress-head .muted { font-size: 12px; }
@@ -296,9 +301,10 @@ kbd {
 .gap.ahead  { color: var(--good); }
 .gap.behind { color: var(--rival); }
 
-.net-card { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 128px; }
+.net-card { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 186px; }
 .net-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 13px; }
-.net-row .muted { font-size: 10px; letter-spacing: 0.16em; width: 34px; }
+/* Türkçe etiketler İngilizce kısaltmalardan uzun — sabit genişlik yerine esnek. */
+.net-row .muted { font-size: 10px; letter-spacing: 0.12em; flex: 1; white-space: nowrap; }
 .net-row .unit { font-size: 10px; color: var(--muted); }
 #ping.warn { color: var(--warn); }
 #ping.bad  { color: var(--rival); }
@@ -323,8 +329,8 @@ kbd {
   font-family: var(--mono); font-weight: 800; font-size: 46px; line-height: 1;
   text-shadow: 0 0 30px rgba(34, 224, 255, 0.35);
 }
-.speed-value small { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.28em;
-                     color: var(--muted); margin-top: 4px; }
+.speed-value small { display: block; font-size: 11px; font-weight: 600; letter-spacing: 0.16em;
+                     color: var(--muted); margin-top: 4px; white-space: nowrap; }
 
 .lane-pips { display: flex; gap: 8px; }
 .lane-pips i {

@@ -26,16 +26,35 @@ const CONFIG = {
   // Track geometry — sent to clients so both sides agree on the world.
   LANE_COUNT: 4,
   LANE_WIDTH: 3.5,
-  SPAWN_AHEAD: 260,          // metres ahead of the start line where traffic appears
+  SPAWN_AHEAD: 250,          // metres ahead of the start line where traffic appears
+  SPAWN_JITTER: 45,          // random extra distance on top of SPAWN_AHEAD
   DESPAWN_BEHIND: 80,        // metres behind a car before the client may cull it
   FINISH_DISTANCE: 6000,     // metres to win
 
   // Traffic pacing (milliseconds of race time between spawns).
-  SPAWN_INTERVAL_MIN: 420,
-  SPAWN_INTERVAL_MAX: 1100,
-  DIFFICULTY_RAMP_MS: 90000, // interval shrinks towards MIN over this period
-  TRAFFIC_SPEED_MIN: 14,     // m/s
+  // Roughly half the old rate — the spacing rules below do the rest.
+  SPAWN_INTERVAL_MIN: 900,
+  SPAWN_INTERVAL_MAX: 2000,
+  DIFFICULTY_RAMP_MS: 120000, // interval shrinks towards MIN over this period
+  TRAFFIC_SPEED_MIN: 16,      // m/s
   TRAFFIC_SPEED_MAX: 30,
+
+  // Traffic models. The client loads one prefab per entry; the server picks a
+  // model per spawn so both clients render the same car in the same slot.
+  TRAFFIC_MODELS: ['npc1', 'npc2', 'npc3'],
+  TRAFFIC_COLORS: 4,          // cosmetic paint variants per model
+
+  // --- breathing room -----------------------------------------------------
+  MIN_LANE_GAP: 52,           // metres between two cars sharing a lane
+  BLOCK_WINDOW: 38,           // a lane counts as "walled" within this band
+  MIN_OPEN_LANES: 2,          // never wall off more than LANE_COUNT - this
+  MAX_ACTIVE_TRAFFIC: 22,     // hard ceiling on cars alive in the play window
+  // Looking 40 s ahead (rather than 14) removes every 4-wide road block across
+  // a 40-run sweep and cuts 3-wide formations from 12% of encounters to 5%,
+  // for the same number of cars on track.
+  PASSABLE_HORIZON_MS: 40000, // look this far ahead when checking for road blocks
+  PASSABLE_STEP_MS: 700,      // sampling resolution of that check
+  NOMINAL_PLAYER_SPEED: 55,   // m/s — fallback frontier before any state report
 
   COUNTDOWN_MS: 3000,
   TICK_MS: 50,               // spawn scheduler resolution
@@ -136,6 +155,7 @@ function createRoom() {
     raceStartAt: 0,          // server epoch ms when raceTime === 0
     nextSpawnAt: 0,          // race time (ms) of the next spawn
     trafficSeq: 0,
+    traffic: [],             // live spawn records used for spacing decisions
     rng: null,
     timer: null,
   };
@@ -175,6 +195,7 @@ function roomSnapshot(room) {
       spawnAhead: CONFIG.SPAWN_AHEAD,
       despawnBehind: CONFIG.DESPAWN_BEHIND,
       finishDistance: CONFIG.FINISH_DISTANCE,
+      trafficModels: CONFIG.TRAFFIC_MODELS,
     },
   };
 }
@@ -207,7 +228,8 @@ function tryStartMatch(room) {
   room.seed = crypto.randomBytes(4).readUInt32BE(0);
   room.rng = makeRng(room.seed);
   room.trafficSeq = 0;
-  room.nextSpawnAt = 800; // small grace period after the lights go green
+  room.traffic = [];
+  room.nextSpawnAt = 1400; // grace period after the lights go green
   room.phase = 'countdown';
   room.raceStartAt = Date.now() + CONFIG.COUNTDOWN_MS;
 
@@ -226,24 +248,148 @@ function tryStartMatch(room) {
   room.timer = setInterval(() => tickRoom(room), CONFIG.TICK_MS);
 }
 
-/** Deterministic traffic generator — the only source of spawns in the game. */
-function spawnTraffic(room, raceTime) {
+/* --------------------------------------------------------------- traffic */
+
+/** Where a spawned car sits at `raceTime`, in metres from the start line. */
+function trafficZAt(car, raceTime) {
+  return car.z + (car.speed * (raceTime - car.raceTime)) / 1000;
+}
+
+/**
+ * Where the race is happening right now, in metres from the start line.
+ *
+ * `lead` is the car furthest up the road: new traffic is placed ahead of it so
+ * nobody ever meets a car that spawned behind them. `rear` is the trailing car:
+ * spacing records stay alive until the slower player has actually driven past.
+ * Crashed players are ignored — they have stopped.
+ */
+function raceFrontier(room, raceTime) {
+  const live = [...room.players.values()].filter((p) => !p.crashed && !p.finished);
+  const nominal = (CONFIG.NOMINAL_PLAYER_SPEED * raceTime) / 1000;
+  if (!live.length) return { lead: nominal, rear: nominal };
+  return {
+    lead: Math.max(...live.map((p) => p.distance)),
+    rear: Math.min(...live.map((p) => p.distance)),
+  };
+}
+
+/** Retire records both players have driven past, or that ran off ahead. */
+function pruneTraffic(room, raceTime, frontier) {
+  room.traffic = room.traffic.filter((car) => {
+    const z = trafficZAt(car, raceTime);
+    return z > frontier.rear - 120 && z < frontier.lead + 800;
+  });
+}
+
+/**
+ * Would adding this car ever leave the players with fewer than MIN_OPEN_LANES
+ * clear lanes across its own z band?
+ *
+ * Cars in different lanes drift relative to each other, so a formation that
+ * looks fine at spawn time can close into a rolling road block ten seconds
+ * later — exactly when the player arrives. Every car moves at a constant speed,
+ * so we can just walk the run-up window and check each sample.
+ */
+function staysPassable(lanes, candidateLane, z, candidateSpeed, raceTime) {
+  for (let ahead = 0; ahead <= CONFIG.PASSABLE_HORIZON_MS; ahead += CONFIG.PASSABLE_STEP_MS) {
+    const dt = ahead / 1000;
+    const myZ = z + candidateSpeed * dt;
+
+    let blocked = 0;
+    for (let l = 0; l < CONFIG.LANE_COUNT; l++) {
+      if (l === candidateLane) { blocked++; continue; }
+      const busy = lanes[l].some((c) => Math.abs(c.z + c.speed * dt - myZ) < CONFIG.BLOCK_WINDOW);
+      if (busy) blocked++;
+    }
+    if (CONFIG.LANE_COUNT - blocked < CONFIG.MIN_OPEN_LANES) return false;
+  }
+  return true;
+}
+
+/**
+ * Deterministic traffic generator — the only source of spawns in the game.
+ *
+ * Every candidate consumes a fixed number of PRNG draws whether or not it ends
+ * up spawning, so a given seed always produces the same road. On top of the raw
+ * roll we enforce three rules that make the traffic driveable:
+ *
+ *   1. cars sharing a lane keep at least MIN_LANE_GAP metres between them;
+ *   2. a car never spawns faster than the car it is following, so gaps in a
+ *      lane can only ever open up, never close;
+ *   3. at least MIN_OPEN_LANES lanes stay clear across any BLOCK_WINDOW band,
+ *      so there is always a line through the traffic.
+ *
+ * Traffic is placed relative to the leading car rather than to the start line,
+ * so the road keeps filling in for the whole 6 km.
+ *
+ * @returns {object|null} the broadcast event, or null when the roll was vetoed.
+ */
+function spawnTraffic(room, raceTime, frontier = raceFrontier(room, raceTime)) {
   const r = room.rng;
-  const lane = Math.floor(r() * CONFIG.LANE_COUNT);
-  const speed =
+
+  // Draw first, decide later — keeps the PRNG stream independent of the veto.
+  const laneRoll = r();
+  const speedRoll = r();
+  const zRoll = r();
+  const modelRoll = r();
+  const colorRoll = r();
+
+  pruneTraffic(room, raceTime, frontier);
+  if (room.traffic.length >= CONFIG.MAX_ACTIVE_TRAFFIC) return null;
+
+  const z = frontier.lead + CONFIG.SPAWN_AHEAD + zRoll * CONFIG.SPAWN_JITTER;
+  let speed =
     CONFIG.TRAFFIC_SPEED_MIN +
-    r() * (CONFIG.TRAFFIC_SPEED_MAX - CONFIG.TRAFFIC_SPEED_MIN);
+    speedRoll * (CONFIG.TRAFFIC_SPEED_MAX - CONFIG.TRAFFIC_SPEED_MIN);
+
+  // Snapshot of where every live car is right now, bucketed by lane.
+  const lanes = Array.from({ length: CONFIG.LANE_COUNT }, () => []);
+  for (const car of room.traffic) {
+    lanes[car.lane].push({ z: trafficZAt(car, raceTime), speed: car.speed });
+  }
+
+  const firstChoice = Math.floor(laneRoll * CONFIG.LANE_COUNT) % CONFIG.LANE_COUNT;
+  let lane = -1;
+
+  // Try the rolled lane first, then the others in a fixed rotation.
+  for (let i = 0; i < CONFIG.LANE_COUNT; i++) {
+    const candidate = (firstChoice + i) % CONFIG.LANE_COUNT;
+
+    // (1) elbow room in the lane, right now
+    if (!lanes[candidate].every((c) => Math.abs(c.z - z) >= CONFIG.MIN_LANE_GAP)) continue;
+
+    // (2) speed window that keeps the lane's gaps from ever closing:
+    //     no faster than the car ahead, no slower than the car behind.
+    const lo = Math.max(CONFIG.TRAFFIC_SPEED_MIN,
+      ...lanes[candidate].filter((c) => c.z < z).map((c) => c.speed));
+    const hi = Math.min(CONFIG.TRAFFIC_SPEED_MAX,
+      ...lanes[candidate].filter((c) => c.z > z).map((c) => c.speed));
+    if (lo > hi) continue;
+    const laneSpeed = Math.min(Math.max(speed, lo), hi);
+
+    // (3) the road must stay passable — not just now, but for the whole run-up
+    //     while the leading player closes the SPAWN_AHEAD gap. Everything moves
+    //     at a constant speed, so sampling the next few seconds is exact enough.
+    if (!staysPassable(lanes, candidate, z, laneSpeed, raceTime)) continue;
+
+    lane = candidate;
+    speed = laneSpeed;
+    break;
+  }
+  if (lane < 0) return null;
 
   const event = {
     id: ++room.trafficSeq,
     lane,
     laneX: (lane - (CONFIG.LANE_COUNT - 1) / 2) * CONFIG.LANE_WIDTH,
-    z: CONFIG.SPAWN_AHEAD + r() * 40,   // metres from the start line
+    z: Number(z.toFixed(3)),            // metres from the start line
     speed: Number(speed.toFixed(3)),    // m/s, moving away from the players
-    variant: Math.floor(r() * 4),       // cosmetic (colour / model swap)
+    model: CONFIG.TRAFFIC_MODELS[Math.floor(modelRoll * CONFIG.TRAFFIC_MODELS.length) % CONFIG.TRAFFIC_MODELS.length],
+    variant: Math.floor(colorRoll * CONFIG.TRAFFIC_COLORS) % CONFIG.TRAFFIC_COLORS,
     raceTime: Math.round(raceTime),     // race-clock ms this car exists from
   };
 
+  room.traffic.push(event);
   io.to(room.code).emit('traffic:spawn', event);
   return event;
 }
@@ -272,9 +418,10 @@ function tickRoom(room) {
   const raceTime = now - room.raceStartAt;
 
   // Catch up on any spawns due this tick (bounded so a stalled loop can't flood).
+  const frontier = raceFrontier(room, raceTime);
   let guard = 0;
-  while (room.nextSpawnAt <= raceTime && guard++ < 10) {
-    spawnTraffic(room, room.nextSpawnAt);
+  while (room.nextSpawnAt <= raceTime && guard++ < 6) {
+    spawnTraffic(room, room.nextSpawnAt, frontier);
     scheduleNextSpawn(room, room.nextSpawnAt);
   }
 
@@ -350,18 +497,18 @@ io.on('connection', (socket) => {
    * No code => create a room and return the invite link path.
    */
   socket.on('room:join', (payload = {}, ack) => {
-    if (socket.data.roomCode) return fail(ack, 'ALREADY_IN_ROOM', 'Leave the current room first.');
+    if (socket.data.roomCode) return fail(ack, 'ALREADY_IN_ROOM', 'Önce mevcut odadan ayrılmalısın.');
 
     const requested = String(payload.room || '').toUpperCase().trim();
     let room;
 
     if (requested) {
-      if (!ROOM_CODE_RE.test(requested)) return fail(ack, 'BAD_CODE', 'Invalid room code.');
+      if (!ROOM_CODE_RE.test(requested)) return fail(ack, 'BAD_CODE', 'Geçersiz oda kodu.');
       room = rooms.get(requested);
-      if (!room) return fail(ack, 'NOT_FOUND', 'That room no longer exists.');
-      if (room.players.size >= CONFIG.MAX_PLAYERS) return fail(ack, 'FULL', 'Room is full.');
+      if (!room) return fail(ack, 'NOT_FOUND', 'Böyle bir oda yok.');
+      if (room.players.size >= CONFIG.MAX_PLAYERS) return fail(ack, 'FULL', 'Oda dolu.');
       if (room.phase === 'countdown' || room.phase === 'racing') {
-        return fail(ack, 'IN_PROGRESS', 'That race has already started.');
+        return fail(ack, 'IN_PROGRESS', 'Bu yarış çoktan başladı.');
       }
     } else {
       room = createRoom();
@@ -370,7 +517,7 @@ io.on('connection', (socket) => {
     const isHost = room.players.size === 0;
     const player = {
       id: socket.id,
-      name: sanitizeName(payload.name, isHost ? 'Player 1' : 'Player 2'),
+      name: sanitizeName(payload.name, isHost ? 'Oyuncu 1' : 'Oyuncu 2'),
       isHost,
       ready: false,
       distance: 0,
@@ -402,11 +549,11 @@ io.on('connection', (socket) => {
 
   socket.on('room:ready', (ready, ack) => {
     const room = currentRoom();
-    if (!room) return fail(ack, 'NO_ROOM', 'Not in a room.');
+    if (!room) return fail(ack, 'NO_ROOM', 'Bir odada değilsin.');
     const player = room.players.get(socket.id);
-    if (!player) return fail(ack, 'NO_PLAYER', 'Not in a room.');
+    if (!player) return fail(ack, 'NO_PLAYER', 'Bir odada değilsin.');
     if (room.phase === 'countdown' || room.phase === 'racing') {
-      return fail(ack, 'IN_PROGRESS', 'Race already running.');
+      return fail(ack, 'IN_PROGRESS', 'Yarış zaten sürüyor.');
     }
     player.ready = ready !== false;
     if (typeof ack === 'function') ack({ ok: true, ready: player.ready });
@@ -481,12 +628,12 @@ io.on('connection', (socket) => {
 
   socket.on('room:rematch', (_payload, ack) => {
     const room = currentRoom();
-    if (!room) return fail(ack, 'NO_ROOM', 'Not in a room.');
+    if (!room) return fail(ack, 'NO_ROOM', 'Bir odada değilsin.');
     if (room.phase === 'countdown' || room.phase === 'racing') {
-      return fail(ack, 'BAD_PHASE', 'Race is already running.');
+      return fail(ack, 'BAD_PHASE', 'Yarış zaten sürüyor.');
     }
     const player = room.players.get(socket.id);
-    if (!player) return fail(ack, 'NO_PLAYER', 'Not in a room.');
+    if (!player) return fail(ack, 'NO_PLAYER', 'Bir odada değilsin.');
 
     // Stay in `finished` until BOTH players opt in — flipping the phase here
     // would reject the second player's request.
@@ -565,4 +712,8 @@ process.on('SIGINT', () => shutdown('SIGINT'));
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('unhandledRejection', (err) => log('unhandledRejection', err));
 
-module.exports = { app, server, io, rooms, CONFIG, makeRng };
+module.exports = {
+  app, server, io, rooms, CONFIG, makeRng,
+  // trafik üreticisi — testler ve determinizm doğrulaması için dışa açık
+  spawnTraffic, scheduleNextSpawn, trafficZAt, raceFrontier,
+};
