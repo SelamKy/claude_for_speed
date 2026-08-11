@@ -32,9 +32,9 @@ const CONFIG = {
   FINISH_DISTANCE: 6000,     // metres to win
 
   // Traffic pacing (milliseconds of race time between spawns).
-  // Roughly half the old rate — the spacing rules below do the rest.
-  SPAWN_INTERVAL_MIN: 900,
-  SPAWN_INTERVAL_MAX: 2000,
+  // Medium density: the spacing/passability rules below still guarantee a line.
+  SPAWN_INTERVAL_MIN: 420,
+  SPAWN_INTERVAL_MAX: 950,
   DIFFICULTY_RAMP_MS: 120000, // interval shrinks towards MIN over this period
   TRAFFIC_SPEED_MIN: 16,      // m/s
   TRAFFIC_SPEED_MAX: 30,
@@ -45,10 +45,20 @@ const CONFIG = {
   TRAFFIC_COLORS: 4,          // cosmetic paint variants per model
 
   // --- breathing room -----------------------------------------------------
-  MIN_LANE_GAP: 52,           // metres between two cars sharing a lane
+  MIN_LANE_GAP: 42,           // metres between two cars sharing a lane
   BLOCK_WINDOW: 38,           // a lane counts as "walled" within this band
   MIN_OPEN_LANES: 2,          // never wall off more than LANE_COUNT - this
-  MAX_ACTIVE_TRAFFIC: 22,     // hard ceiling on cars alive in the play window
+  MAX_ACTIVE_TRAFFIC: 26,     // hard ceiling on cars alive in the play window
+
+  // --- density floor: keep the view window ahead of the leader populated -----
+  ACTIVE_WINDOW: 340,         // metres ahead of the leader that count as "in view"
+  TARGET_ACTIVE_MIN: 6,       // top up until at least this many cars are in view
+  TARGET_ACTIVE_MAX: 10,      // stop topping up at this many
+
+  // --- recycling: cars left behind come back ahead of the pack ---------------
+  RECYCLE_BEHIND: 180,        // metres behind the trailing player before recycling
+  RECYCLE_AHEAD_MIN: 30,      // forward respawn distance range (metres)
+  RECYCLE_AHEAD_MAX: 120,
   // Looking 40 s ahead (rather than 14) removes every 4-wide road block across
   // a 40-run sweep and cuts 3-wide formations from 12% of encounters to 5%,
   // for the same number of cars on track.
@@ -277,8 +287,39 @@ function raceFrontier(room, raceTime) {
 function pruneTraffic(room, raceTime, frontier) {
   room.traffic = room.traffic.filter((car) => {
     const z = trafficZAt(car, raceTime);
-    return z > frontier.rear - 120 && z < frontier.lead + 800;
+    return z > frontier.rear - (CONFIG.RECYCLE_BEHIND + 40) && z < frontier.lead + 800;
   });
+}
+
+/**
+ * Cars the pack has driven past come back as fresh traffic ahead of the leader,
+ * at a varied forward distance and a randomised lane, so the road never runs dry.
+ * The retired record is dropped first (the client culls its mesh on its own
+ * despawn rule at ~170 m behind, so there is no double-render).
+ */
+function recycleTraffic(room, raceTime, frontier) {
+  const stale = room.traffic.filter(
+    (car) => trafficZAt(car, raceTime) < frontier.rear - CONFIG.RECYCLE_BEHIND,
+  );
+  if (!stale.length) return;
+
+  const staleIds = new Set(stale.map((car) => car.id));
+  room.traffic = room.traffic.filter((car) => !staleIds.has(car.id));
+
+  for (let i = 0; i < stale.length; i++) {
+    const ahead =
+      CONFIG.RECYCLE_AHEAD_MIN +
+      room.rng() * (CONFIG.RECYCLE_AHEAD_MAX - CONFIG.RECYCLE_AHEAD_MIN);
+    spawnTraffic(room, raceTime, frontier, ahead);
+  }
+}
+
+/** Cars currently inside the active view window ahead of the leader. */
+function activeAhead(room, raceTime, frontier) {
+  return room.traffic.filter((car) => {
+    const z = trafficZAt(car, raceTime);
+    return z > frontier.lead - 20 && z < frontier.lead + CONFIG.ACTIVE_WINDOW;
+  }).length;
 }
 
 /**
@@ -324,7 +365,7 @@ function staysPassable(lanes, candidateLane, z, candidateSpeed, raceTime) {
  *
  * @returns {object|null} the broadcast event, or null when the roll was vetoed.
  */
-function spawnTraffic(room, raceTime, frontier = raceFrontier(room, raceTime)) {
+function spawnTraffic(room, raceTime, frontier = raceFrontier(room, raceTime), ahead = null) {
   const r = room.rng;
 
   // Draw first, decide later — keeps the PRNG stream independent of the veto.
@@ -337,7 +378,10 @@ function spawnTraffic(room, raceTime, frontier = raceFrontier(room, raceTime)) {
   pruneTraffic(room, raceTime, frontier);
   if (room.traffic.length >= CONFIG.MAX_ACTIVE_TRAFFIC) return null;
 
-  const z = frontier.lead + CONFIG.SPAWN_AHEAD + zRoll * CONFIG.SPAWN_JITTER;
+  const z =
+    ahead != null
+      ? frontier.lead + ahead                                        // recycled car
+      : frontier.lead + CONFIG.SPAWN_AHEAD + zRoll * CONFIG.SPAWN_JITTER;
   let speed =
     CONFIG.TRAFFIC_SPEED_MIN +
     speedRoll * (CONFIG.TRAFFIC_SPEED_MAX - CONFIG.TRAFFIC_SPEED_MIN);
@@ -423,6 +467,17 @@ function tickRoom(room) {
   while (room.nextSpawnAt <= raceTime && guard++ < 6) {
     spawnTraffic(room, room.nextSpawnAt, frontier);
     scheduleNextSpawn(room, room.nextSpawnAt);
+  }
+
+  // Recycle anything the pack has left behind, then hold the density floor so
+  // the view window ahead never empties out between scheduled spawns.
+  recycleTraffic(room, raceTime, frontier);
+  let topUp = 0;
+  while (
+    activeAhead(room, raceTime, frontier) < CONFIG.TARGET_ACTIVE_MIN &&
+    topUp++ < CONFIG.TARGET_ACTIVE_MAX
+  ) {
+    if (!spawnTraffic(room, raceTime, frontier)) break;
   }
 
   const alive = [...room.players.values()].filter((p) => !p.crashed && !p.finished);
@@ -715,5 +770,5 @@ process.on('unhandledRejection', (err) => log('unhandledRejection', err));
 module.exports = {
   app, server, io, rooms, CONFIG, makeRng,
   // trafik üreticisi — testler ve determinizm doğrulaması için dışa açık
-  spawnTraffic, scheduleNextSpawn, trafficZAt, raceFrontier,
+  spawnTraffic, scheduleNextSpawn, trafficZAt, raceFrontier, recycleTraffic, activeAhead,
 };
