@@ -203,7 +203,7 @@ function feed(msg, kind = '') {
 
 /* ============================== ağ katmanı ============================= */
 
-const socket = io({ transports: ['websocket', 'polling'] });
+const socket = io({ transports: ['websocket'], upgrade: false });
 
 const net = {
   offset: 0,          // serverNow ≈ Date.now() + offset
@@ -269,7 +269,8 @@ const canvas = $('scene');
 const renderer = new THREE.WebGLRenderer({
   canvas, antialias: true, powerPreference: 'high-performance', stencil: false,
 });
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0));
+renderer.shadowMap.enabled = false;
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -1599,7 +1600,8 @@ function sendState(now) {
 
 function frame() {
   requestAnimationFrame(frame);
-  const dt = Math.min(clock.getDelta(), 0.05);
+  const rawDt = clock.getDelta();
+  const dt = Math.min(rawDt, 0.033);
   const now = performance.now();
 
   fpsAcc += dt; fpsFrames++;
