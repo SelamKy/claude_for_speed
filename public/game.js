@@ -281,6 +281,7 @@ scene.background = new THREE.Color(0x070b14);
 scene.fog = new THREE.Fog(0x070b14, 120, 460);
 
 const camera = new THREE.PerspectiveCamera(VIEW.fovBase, innerWidth / innerHeight, 0.4, 1400);
+camera.up.set(0, 1, 0);
 camera.position.set(0, VIEW.camHeight, -VIEW.camBack);
 
 /* Stüdyo benzeri IBL — böylece boya ve krom gerçekten metal gibi okunur. */
@@ -1544,6 +1545,7 @@ function tickCamera(dt) {
 
   // Look straight ahead along +Z, centered on road (x=0)
   camTarget.set(0, 1.15, me.distance + VIEW.camLookAhead);
+  camera.up.set(0, 1, 0);
   camera.lookAt(camTarget);
   camera.rotation.z = 0;   // zero roll always
 
