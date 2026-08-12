@@ -1,5 +1,5 @@
 /* =====================================================================
-   Traffic Duel — istemci  (Trafik Düellosu)
+   Claude for Speed — istemci
    ---------------------------------------------------------------------
    Dünya düzeni:
      +Z = gidiş yönü (bir aracın "mesafe"si aslında onun z değeridir)
@@ -17,6 +17,15 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+
+import { SceneryField, buildBuildingPrefabs, buildFallbackPrefabs } from './js/scenery.js';
+import { Atmosphere, pickEnvironment } from './js/atmosphere.js';
+import { Fx } from './js/fx.js';
+import { buildProceduralPrefab, applyLook, makeHeadlights } from './js/vehicles.js';
+import { GarageScreen } from './js/garage-ui.js';
+import {
+  garage, VEHICLE_BY_ID, computeStats, REWARDS,
+} from './js/garage.js';
 
 /* ============================== sabitler =============================== */
 
@@ -40,8 +49,23 @@ const MODELS = {
     faceYaw: Math.PI,
     paint: /^Material\.032$/,
     length: 4.72,
-    weight: 0.49,           // yükleme çubuğundaki payı (indirme boyutuna göre)
+    weight: 0.374,          // yükleme çubuğundaki payı (indirme boyutuna göre)
     interiorSkin: 0.15,     // tam gövde kabuğu kalsın: bu araç ekranı doldurur
+  },
+
+  /* Garajdaki ikinci gerçek model — Spor Coupe.
+     Ölçüm: farlar z = +1.90, stoplar z = -2.14  -> burun zaten +Z, çevirme yok. */
+  skyline: {
+    key: 'skyline',
+    url: '/models/nissan_skyline_gtr_r35.glb',
+    faceYaw: 0,
+    paint: /^r35_paint$/,
+    length: 4.71,
+    weight: 0.151,
+    interiorSkin: 0.14,
+    // Kabin döşemesi, gösterge ekranları ve motor/turbo tesisatı: yarış
+    // kamerasından görünmez ama örnek başına yüz binlerce üçgen tutar.
+    dropMaterials: /^(r35_(leather|carpet|cloth|engine|display|gauges|steeringwheel|interior|screen)|gtr_interior|Meo_turbo)/i,
   },
 
   /* --- trafik modelleri: sunucu her spawn için birini seçer -------------- */
@@ -51,7 +75,7 @@ const MODELS = {
     faceYaw: Math.PI / 2,
     paint: /^body$/,
     length: 4.90,           // minibüs gövdeli, geniş
-    weight: 0.22,
+    weight: 0.170,
     interiorSkin: 0.12,
     // Sahne süsleri: modelin yanında gelen duvar fenerleri ve pişmiş gölge
     // düzlemi. Bunlar araç kabuğunu şişirdiği için ÖLÇÜMDEN ÖNCE atılır.
@@ -63,7 +87,7 @@ const MODELS = {
     faceYaw: -Math.PI / 2,
     paint: /^body$/,
     length: 4.86,
-    weight: 0.26,
+    weight: 0.195,
     interiorSkin: 0.10,
     // Deri döşeme ve kabin süsü — yanından 250 km/s ile geçilen bir araçta
     // görünmez, ama örnek başına ~50 bin üçgen tutar.
@@ -75,14 +99,20 @@ const MODELS = {
     faceYaw: 0,
     paint: /^phong1$/,
     length: 4.20,           // Audi TT gövdesi, kısa
-    weight: 0.03,
+    weight: 0.024,
     interiorSkin: 0.10,
     dropMaterials: /^internal$/i,
   },
 };
 
+/** Yol kenarı manzarası — araç değil, kendi hattı var. */
+const SCENERY_MODEL = { key: 'scenery', url: '/models/new_york_buildings.glb', weight: 0.086 };
+
 /** Sunucunun `model` alanında gönderebileceği trafik modelleri. */
 const TRAFFIC_MODELS = ['npc1', 'npc2', 'npc3'];
+
+/** Garajdaki gerçek (indirilen) araç modelleri. */
+const PLAYER_MODELS = ['player', 'skyline'];
 
 /** Bir aracın alçak poligonlu vekiline geçtiği mesafe (m). */
 const LOD_SWAP = 70;
@@ -95,9 +125,16 @@ const CAR = {
   hitScaleZ: 0.92,
 };
 
+/* Araçtan bağımsız sürüş sabitleri. Araca BAĞLI olanlar (tavan hız, ivme,
+   fren, yol tutuş, nitro) garajdan gelir ve `applyLoadout()` ile aşağıdaki
+   DRIVE nesnesinin üzerine yazılır — oyun döngüsü tek bir kaynaktan okur. */
 const DRIVE = {
   startSpeed: 42,           // yeşil ışıkta m/s
-  maxSpeed: 109.7,          // 395 km/h
+  maxSpeed: 109.7,          // 395 km/h — araç seçimiyle değişir
+  // Nitro dahil hiçbir kurulumun aşamayacağı tavan (439 km/h). Sunucunun
+  // MAX_SPEED_SANITY eşiğinin altında kalması şart: aksi halde meşru bir
+  // tam gaz anı "hile" sanılıp mesafe raporu kırpılırdı.
+  hardMaxSpeed: 122,
   minSpeed: 8,
   accel: 15,
   brake: 34,
@@ -106,6 +143,23 @@ const DRIVE = {
   laneSnap: 6.2,            // şerit merkezine çeken yay katsayısı
   steerResponse: 11,        // yanal hızın hedefe oturma hızı (1/s)
   laneRepeatMs: 260,        // tuşu basılı tutunca şerit şerit kayma
+};
+
+/** Tabanlar: araç istatistikleri bunların üzerine ORAN olarak biner. */
+const DRIVE_BASE = {
+  laneChangeSpeed: DRIVE.laneChangeSpeed,
+  laneSnap: DRIVE.laneSnap,
+  steerResponse: DRIVE.steerResponse,
+  laneRepeatMs: DRIVE.laneRepeatMs,
+};
+
+/** Nitro davranışı — kapasite/dolum araçtan, his buradan gelir. */
+const NITRO = {
+  capacity: 2.4,            // sn — dolu depo kaç saniye yanar
+  refill: 0.18,             // birim/s (1 = tam depo)
+  boost: 1.14,              // tavan hız çarpanı
+  accelBoost: 2.35,         // ivme çarpanı
+  minToFire: 0.12,          // bu seviyenin altında ateşlenemez
 };
 
 /* Gövde animasyonu. Açılar radyan; hepsi tuş bırakılınca lerp ile nötre döner. */
@@ -139,11 +193,31 @@ const VIEW = {
   camBack: 8.6,
   camHeight: 3.35,
   camLookAhead: 16,
+  camBackSpeed: 2.6,        // hızla kameranın ekstra geri çekilmesi (m)
+  camBackBoost: 2.2,        // nitroda ek geri çekilme (m)
   fovBase: 62,
   fovMax: 84,
+  fovBoost: 7,              // nitroda ek görüş açısı (derece)
   drawAhead: 340,           // örneklemeye değer trafik mesafesi (m)
   drawBehind: 90,
 };
+
+/* Yoldan toplanan jetonlar. Konumları YARIŞ TOHUMUNDAN türetilir, yani
+   sunucuya tek bir paket bile eklemeden iki istemci de aynı jetonları
+   aynı yerde görür. */
+const PICKUP = {
+  spacing: 190,             // m — iki jeton kümesi arası
+  perCluster: 5,
+  clusterGap: 11,           // küme içi jetonlar arası (m)
+  radius: 0.55,
+  height: 1.0,
+  grabZ: 3.2,               // toplama kutusu (m)
+  grabX: 1.5,
+  drawAhead: 420,
+};
+
+/** Sıyırarak geçiş: bu kadar yakından geçmek jeton kazandırır. */
+const NEAR_MISS = { lateral: 2.35, longitudinal: 3.6, minSpeed: 26, streakMs: 2200 };
 
 /* Yedekler — sunucunun `config` paketiyle üzerine yazılır. */
 let CONFIG = {
@@ -178,6 +252,13 @@ const el = {
   gameover: $('gameover'), resultTitle: $('result-title'), resultSub: $('result-sub'),
   resultList: $('result-list'), btnRematch: $('btn-rematch'), btnQuit: $('btn-quit'),
   rematchStatus: $('rematch-status'), toasts: $('toasts'), speedlines: $('speedlines'),
+
+  // garaj + yeni HUD
+  btnGarage: $('btn-garage'), btnGarage2: $('btn-garage-2'),
+  lobbyCoins: $('lobby-coins'), lobbyLoadout: $('lobby-loadout'),
+  runCoins: $('run-coins'), purseCard: document.querySelector('.purse-card'),
+  nitro: document.querySelector('.nitro'), nitroFill: $('nitro-fill'),
+  payout: $('payout'),
 };
 
 const show = (node, on) => node.classList.toggle('hidden', !on);
@@ -250,17 +331,24 @@ const G = {
     distance: 0, speed: 0, x: 0, lane: 1, targetLane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
+    nitro: 1, boosting: false,
   },
   rival: {
     id: null, buffer: [], distance: 0, x: 0, speed: 0, lateral: 0,
-    steer: 0, crashed: false, visible: false,
+    steer: 0, crashed: false, visible: false, loadout: null,
   },
 
   traffic: new Map(),       // id -> { id, lane, laneX, z, speed, model, variant, raceTime, obj }
   lastStateSent: 0,
+
+  /* --- koşu ekonomisi ------------------------------------------------- */
+  env: 'night',
+  purse: { distance: 0, pickups: 0, nearMiss: 0, streak: 0, streakAt: 0, total: 0, banked: false },
+  pickups: new Map(),       // index -> { x, z, taken }
+  nearMissed: new Set(),    // aynı trafik aracı iki kez sayılmasın
 };
 
-const input = { throttle: false, brakeKey: false, left: false, right: false };
+const input = { throttle: false, brakeKey: false, left: false, right: false, nitro: false };
 let laneRepeatAt = 0;
 
 /* ============================== renderer =============================== */
@@ -301,6 +389,17 @@ const rim = new THREE.DirectionalLight(0xff5fa2, 0.55);
 rim.position.set(30, 18, -50);
 scene.add(rim);
 
+/* Alt sistemler. Hepsi boot() içinde kurulur; burada yalnızca bildiriliyorlar
+   ki `instantiate()` gibi erken tanımlanan fonksiyonlar onlara erişebilsin. */
+/** @type {import('./js/atmosphere.js').Atmosphere|null} */
+let atmosphere = null;
+/** @type {import('./js/scenery.js').SceneryField|null} */
+let scenery = null;
+/** @type {import('./js/fx.js').Fx|null} */
+let fx = null;
+/** @type {import('./js/garage-ui.js').GarageScreen|null} */
+let garageScreen = null;
+
 addEventListener('resize', () => {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -333,11 +432,14 @@ function makeMarkingTexture() {
   const c = document.createElement('canvas');
   c.width = px; c.height = px;
   const g = c.getContext('2d');
-  g.fillStyle = '#0d1119'; g.fillRect(0, 0, px, px);
+  // Taban asfalt tonu ORTA gri: atmosfer katmanı malzemenin `color` çarpanını
+  // gündüz 1'e, gece ~0.3'e çekerek aynı dokudan hem parlak hem karanlık yol
+  // üretebilsin. Doku baştan koyu olsaydı gündüz aydınlatılamazdı.
+  g.fillStyle = '#3b4048'; g.fillRect(0, 0, px, px);
 
   // hafif asfalt taneciği
   for (let i = 0; i < 2600; i++) {
-    g.fillStyle = `rgba(255,255,255,${Math.random() * 0.035})`;
+    g.fillStyle = `rgba(0,0,0,${Math.random() * 0.12})`;
     g.fillRect(Math.random() * px, Math.random() * px, 1.5, 1.5);
   }
 
@@ -365,6 +467,8 @@ function buildRoad() {
   road.group.clear();
   if (road.markings) road.markings.dispose();
   road.barriers.length = 0; road.poles.length = 0; road.blocks.length = 0;
+  road.surfaceMaterials = [];
+  road.lampMaterials = [];
 
   const w = roadWidth();
   const len = road.segmentLength * 2;
@@ -372,28 +476,27 @@ function buildRoad() {
   road.markings = makeMarkingTexture();
   road.markings.repeat.set(1, len / 20);
 
-  road.surface = new THREE.Mesh(
-    new THREE.PlaneGeometry(w, len, 1, 1),
-    new THREE.MeshStandardMaterial({ map: road.markings, roughness: 0.92, metalness: 0.0 })
-  );
+  const surfaceMat = new THREE.MeshStandardMaterial({
+    map: road.markings, roughness: 0.92, metalness: 0.0, envMapIntensity: 1,
+  });
+  road.surface = new THREE.Mesh(new THREE.PlaneGeometry(w, len, 1, 1), surfaceMat);
   road.surface.rotation.x = -Math.PI / 2;
   road.group.add(road.surface);
+  road.surfaceMaterials.push(surfaceMat);
 
   // banketler
-  const shoulder = new THREE.Mesh(
-    new THREE.PlaneGeometry(w + 26, len),
-    new THREE.MeshStandardMaterial({ color: 0x090c14, roughness: 1 })
-  );
+  const shoulderMat = new THREE.MeshStandardMaterial({ color: 0x2a2f38, roughness: 1 });
+  const shoulder = new THREE.Mesh(new THREE.PlaneGeometry(w + 26, len), shoulderMat);
   shoulder.rotation.x = -Math.PI / 2;
   shoulder.position.y = -0.04;
   road.group.add(shoulder);
+  road.surfaceMaterials.push(shoulderMat);
 
   // bariyerler ve parlayan kenar şeritleri
+  const railMat = new THREE.MeshStandardMaterial({ color: 0x39465e, roughness: 0.6, metalness: 0.35 });
+  road.barrierMaterials = [railMat];
   for (const side of [-1, 1]) {
-    const rail = new THREE.Mesh(
-      new THREE.BoxGeometry(0.35, 0.85, len),
-      new THREE.MeshStandardMaterial({ color: 0x1b2436, roughness: 0.6, metalness: 0.35 })
-    );
+    const rail = new THREE.Mesh(new THREE.BoxGeometry(0.35, 0.85, len), railMat);
     rail.position.set(side * (w / 2 + 1.4), 0.42, 0);
     road.group.add(rail);
 
@@ -408,9 +511,11 @@ function buildRoad() {
 
   // geri dönüştürülen aydınlatma direkleri
   const poleGeo = new THREE.BoxGeometry(0.22, 8, 0.22);
-  const poleMat = new THREE.MeshStandardMaterial({ color: 0x161d2b, roughness: 0.8 });
+  const poleMat = new THREE.MeshStandardMaterial({ color: 0x2c3548, roughness: 0.8 });
   const lampGeo = new THREE.BoxGeometry(1.6, 0.18, 0.5);
   const lampMat = new THREE.MeshBasicMaterial({ color: 0xffd9a0 });
+  road.lampMaterials.push(lampMat);
+  road.barrierMaterials.push(poleMat);
   for (let i = 0; i < 24; i++) {
     const g = new THREE.Group();
     const p = new THREE.Mesh(poleGeo, poleMat); p.position.y = 4;
@@ -422,17 +527,9 @@ function buildRoad() {
     road.poles.push(g);
   }
 
-  // paralaks siluet blokları
-  const blockMat = new THREE.MeshStandardMaterial({ color: 0x0c1220, roughness: 1 });
-  for (let i = 0; i < 40; i++) {
-    const h = 12 + Math.random() * 70;
-    const b = new THREE.Mesh(new THREE.BoxGeometry(8 + Math.random() * 16, h, 8 + Math.random() * 16), blockMat);
-    b.userData.side = i % 2 ? 1 : -1;
-    b.userData.offset = 40 + Math.random() * 120;
-    b.position.set(b.userData.side * b.userData.offset, h / 2, 0);
-    road.group.add(b);
-    road.blocks.push(b);
-  }
+  // Eski paralaks siluet blokları KALDIRILDI: yerlerini scenery.js'in
+  // gerçek New York binaları aldı (bkz. SceneryField). İki sistem birlikte
+  // çalışsaydı kutular binaların içinden geçerdi.
 
   // bitiş köprüsü
   const gantry = new THREE.Group();
@@ -469,12 +566,6 @@ function updateRoad(distance) {
     g.position.z = base + i * spacing / 2 - distance;
   });
 
-  const bSpacing = 90;
-  road.blocks.forEach((b, i) => {
-    const base = Math.floor((distance - 200) / bSpacing) * bSpacing;
-    b.position.z = base + i * bSpacing / 2 - distance;
-  });
-
   const toFinish = CONFIG.finishDistance - distance;
   road.gantry.visible = toFinish < 420 && toFinish > -30;
   if (road.gantry.visible) road.gantry.position.z = toFinish;
@@ -490,13 +581,14 @@ const loader = new GLTFLoader();
   loader.setDRACOLoader(draco);
 }
 
-const LOAD_KEYS = ['player', ...TRAFFIC_MODELS];
-const progress = Object.fromEntries(LOAD_KEYS.map((k) => [k, 0]));
+const LOAD_KEYS = [...PLAYER_MODELS, ...TRAFFIC_MODELS];
+const ALL_LOADS = { ...MODELS, scenery: SCENERY_MODEL };
+const progress = Object.fromEntries([...LOAD_KEYS, 'scenery'].map((k) => [k, 0]));
 const prefabs = {};
 
 function setLoadProgress() {
   const pct = Math.round(
-    LOAD_KEYS.reduce((sum, k) => sum + progress[k] * MODELS[k].weight, 0) * 100
+    Object.keys(progress).reduce((sum, k) => sum + progress[k] * ALL_LOADS[k].weight, 0) * 100
   );
   el.loadBar.style.width = `${Math.min(100, pct)}%`;
   el.loadLabel.textContent = pct < 100 ? `Araçlar yükleniyor… %${pct}` : 'Otoyol hazırlanıyor…';
@@ -761,7 +853,7 @@ function extractWheels(parts, shell, lateralAxis, lengthAxis) {
  *
  * @returns {{ roll:number[], pitch:number[], lift:number[][] }}
  */
-function measureLift(bodyNorm, rollCentre, rollMax, pitchMax) {
+function measureLift(bodyNorm, rollCentre, rollMax = BODY.rollMax, pitchMax = BODY.pitchMax) {
   const rolls = [0, rollMax * 0.5, rollMax];
   const pitches = [-pitchMax, 0, pitchMax];
 
@@ -1108,8 +1200,25 @@ function makeLowPoly(color, w, h, l) {
   return g.clone(true);
 }
 
-/** Bir prefabı klonlar; boyasını paylaşılan malzemeye dokunmadan değiştirir. */
-function instantiate(prefab, { paint, underglow, tailGlow, lod = false } = {}) {
+/**
+ * Bir prefabı klonlar ve ona bir görünüm giydirir.
+ *
+ * İki farklı giydirme yolu var:
+ *   • `paint` (sayı)  — trafik/hayalet araçlar için tek renk, hızlı yol.
+ *   • `look` (nesne)  — garajdan gelen tam takım (kaplama, cam filmi, jant).
+ *     Bu durumda iş `vehicles.js`'teki `applyLook()`a devredilir; orada
+ *     malzemeler örneğe özel klonlanır ve `__owned` ile işaretlenir.
+ *
+ * @param {THREE.Group} prefab
+ * @param {object} opts
+ * @param {number} [opts.paint]
+ * @param {object} [opts.look]
+ * @param {number} [opts.underglow]  alt neon rengi (yoksa kapalı)
+ * @param {boolean} [opts.tailGlow]
+ * @param {boolean} [opts.lod]
+ * @param {boolean} [opts.headlights]
+ */
+function instantiate(prefab, { paint, look, underglow, tailGlow, lod = false, headlights = false } = {}) {
   const { width, height, length, paintRe, rollCentre, liftTable, spinSign, wheelRadius } = prefab.userData;
 
   const src = prefab.clone(true);
@@ -1126,6 +1235,7 @@ function instantiate(prefab, { paint, underglow, tailGlow, lod = false } = {}) {
       o.material.metalness = Math.max(o.material.metalness ?? 0, 0.55);
       o.material.roughness = Math.min(o.material.roughness ?? 1, 0.28);
       if ('clearcoat' in o.material) o.material.clearcoat = 1;
+      o.userData.__owned = true;
     });
   }
 
@@ -1164,6 +1274,17 @@ function instantiate(prefab, { paint, underglow, tailGlow, lod = false } = {}) {
     width, height, length, rollCentre, liftTable, spinSign, wheelRadius,
     bodyPivot, wheels, spin: 0,
   };
+
+  // Garaj görünümü: boya + kaplama + cam filmi + jant tek çağrıda.
+  if (look) applyLook(car, look, paintRe);
+
+  if (headlights) {
+    const rig = makeHeadlights(width, length, height);
+    car.add(rig.group);
+    car.userData.headlights = rig;
+    rig.setIntensity(atmosphere ? atmosphere.headlightLevel : 0);
+    if (atmosphere) atmosphere.addHeadlights(rig);
+  }
 
   if (DEBUG) {
     const hw = Math.min(width * 0.5 * 0.86, 1.0);
@@ -1278,13 +1399,298 @@ function hitFor(model) {
   return trafficHit.get(model) || { halfWidth: CAR.halfWidth, halfLength: CAR.halfLength };
 }
 
+/* ============================ garaj bağlantısı ========================= */
+
+/** Şu anki aracın türetilmiş istatistikleri (araç tabanı + yükseltmeler). */
+let stats = computeStats(garage.selected, garage.entry(garage.selected).upgrades);
+
+/** Bir araç kimliği için 3B prefab. Prosedürel araçlarda indirme yoktur. */
+function prefabFor(vehicleId) {
+  const v = VEHICLE_BY_ID[vehicleId];
+  if (!v) return prefabs.player || null;
+  return prefabs[v.body === 'glb' ? v.model : v.id] || null;
+}
+
+/**
+ * Garaj seçimini sürüş parametrelerine yazar.
+ *
+ * Yol tutuş (`grip`) tek bir sayıdan üç ayrı davranışa dağılır: yanal hız
+ * tavanı, şerit merkezine çeken yayın sertliği ve tuşu basılı tutunca şerit
+ * atlama sıklığı. Böylece "iyi yol tutuşlu" araç sadece hızlı kaymıyor,
+ * şeride de daha çabuk oturuyor — his olarak fark edilir olan bu.
+ */
+function applyLoadout() {
+  const id = garage.selected;
+  stats = computeStats(id, garage.entry(id).upgrades);
+
+  DRIVE.maxSpeed = Math.min(stats.topSpeed, DRIVE.hardMaxSpeed);
+  DRIVE.accel = stats.accel;
+  DRIVE.brake = stats.brake;
+  DRIVE.laneChangeSpeed = DRIVE_BASE.laneChangeSpeed * stats.grip;
+  DRIVE.laneSnap = DRIVE_BASE.laneSnap * (0.72 + 0.28 * stats.grip);
+  DRIVE.steerResponse = DRIVE_BASE.steerResponse * (0.75 + 0.25 * stats.grip);
+  DRIVE.laneRepeatMs = DRIVE_BASE.laneRepeatMs / Math.max(0.6, stats.grip);
+
+  NITRO.capacity = stats.nitro.capacity;
+  NITRO.refill = stats.nitro.refill;
+  NITRO.boost = stats.nitro.boost;
+}
+
+/** Garajdaki bir aracın tam donanımlı 3B örneği (garaj önizlemesi de bunu kullanır). */
+function makeCar(vehicleId, look, { lod = false, headlights = true } = {}) {
+  const prefab = prefabFor(vehicleId);
+  if (!prefab) return null;
+  const car = instantiate(prefab, {
+    look,
+    underglow: look && look.underglow ? look.underglowColor : undefined,
+    tailGlow: true,
+    lod,
+    headlights,
+  });
+  car.userData.vehicleId = vehicleId;
+  return car;
+}
+
+/** Bir aracı sahneden söker ve örneğe ait malzemeleri bırakır. */
+function retireCar(car) {
+  if (!car) return;
+  world.remove(car);
+  car.traverse((o) => {
+    if (o.isMesh && o.userData.__owned) {
+      const mats = Array.isArray(o.material) ? o.material : [o.material];
+      for (const m of mats) m?.dispose?.();
+    }
+  });
+}
+
+/** En son SAHNEYE kurulmuş donanımın imzası — gereksiz yeniden kurmayı önler. */
+let builtLoadout = '';
+
+function currentLoadoutKey() {
+  return loadoutKey({ vehicle: garage.selected, look: garage.look(garage.selected) });
+}
+
+/**
+ * Oyuncu ve rakip araçlarını mevcut donanıma göre (yeniden) kurar.
+ * Araç değiştirmek, boya değiştirmek veya rakibin donanımı gelmek bunu tetikler.
+ */
+function rebuildCars() {
+  if (!prefabs.player) return;          // henüz yükleniyor
+  builtLoadout = currentLoadoutKey();
+
+  const keepPlayer = playerCar ? playerCar.position.clone() : null;
+  retireCar(playerCar);
+  retireCar(rivalCar);
+  if (atmosphere) atmosphere.clearHeadlights();
+
+  playerCar = makeCar(garage.selected, garage.look(garage.selected), { lod: false });
+  if (playerCar) {
+    world.add(playerCar);
+    if (keepPlayer) playerCar.position.copy(keepPlayer);
+  }
+
+  // Rakip kendi donanımını bildirdiyse onu, bildirmediyse pembe amiral aracı.
+  const rl = G.rival.loadout;
+  const rivalId = rl && VEHICLE_BY_ID[rl.vehicle] ? rl.vehicle : 'bmw';
+  const rivalLook = rl && rl.look ? rl.look : {
+    finish: 'gloss', paint: COLORS.rival, underglow: true,
+    underglowColor: COLORS.rival, tint: 1, rim: 'stock',
+  };
+  rivalCar = makeCar(rivalId, rivalLook, { lod: true });
+  if (rivalCar) {
+    world.add(rivalCar);
+    rivalCar.visible = G.rival.visible;
+  }
+
+  updatePlayerHitbox();
+}
+
+/** Çarpışma kutusu seçili aracın gerçek ölçüsünden türetilir. */
+function updatePlayerHitbox() {
+  if (!playerCar) return;
+  CAR.halfWidth = Math.min(playerCar.userData.width * 0.5, 1.05);
+  CAR.halfLength = playerCar.userData.length * 0.5;
+}
+
+/** Lobide "hangi araçla yarışıyorum" satırı. */
+function refreshLobbyLoadout() {
+  const v = VEHICLE_BY_ID[garage.selected];
+  if (el.lobbyCoins) el.lobbyCoins.textContent = `◈ ${Math.round(garage.coins).toLocaleString('tr-TR')}`;
+  if (el.lobbyLoadout && v) {
+    el.lobbyLoadout.textContent =
+      `${v.name} · ${Math.round(stats.topSpeed * 3.6)} km/s · nitro ${stats.nitro.capacity.toFixed(1)} sn`;
+  }
+}
+
+/* ============================== yol jetonları ========================== */
+
+/**
+ * Jeton kümesi konumları yarış tohumundan türetilir — sunucuya tek bayt
+ * eklemeden iki istemci de aynı jetonları aynı yerde görür.
+ */
+function pickupHash(i) {
+  let n = (G.seed ^ Math.imul(i + 1, 0x9e3779b9)) | 0;
+  n = Math.imul(n ^ (n >>> 16), 0x45d9f3b);
+  n = Math.imul(n ^ (n >>> 16), 0x45d9f3b);
+  return (n ^ (n >>> 16)) >>> 0;
+}
+
+const coinGeo = new THREE.CylinderGeometry(PICKUP.radius, PICKUP.radius, 0.09, 14);
+coinGeo.rotateX(Math.PI / 2);
+const coinMat = new THREE.MeshStandardMaterial({
+  color: 0xffc233, emissive: 0xffa000, emissiveIntensity: 0.75,
+  metalness: 0.9, roughness: 0.22,
+});
+let coinField = null;      // InstancedMesh — tüm jetonlar tek çizim çağrısı
+
+const COIN_CAP = 60;
+const _coinMat4 = new THREE.Matrix4();
+const _coinQuat = new THREE.Quaternion();
+const _coinEuler = new THREE.Euler();
+const _coinPos = new THREE.Vector3();
+const _coinScale = new THREE.Vector3(1, 1, 1);
+const COIN_HIDDEN = new THREE.Matrix4().makeScale(0, 0, 0);
+
+function ensureCoinField() {
+  if (coinField) return;
+  coinField = new THREE.InstancedMesh(coinGeo, coinMat, COIN_CAP);
+  coinField.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+  coinField.frustumCulled = false;
+  coinField.count = 0;
+  world.add(coinField);
+}
+
+/** `index` numaralı kümedeki `k` numaralı jetonun dünya konumu. */
+function coinAt(index, k) {
+  const h = pickupHash(index);
+  const lane = h % CONFIG.laneCount;
+  const drift = ((h >>> 8) % 100) / 100;
+  return {
+    x: laneX(lane),
+    z: (index + 1) * PICKUP.spacing + drift * 60 + k * PICKUP.clusterGap,
+  };
+}
+
+function resetPickups() {
+  G.pickups.clear();
+  if (coinField) coinField.count = 0;
+}
+
+function tickPickups(dt) {
+  ensureCoinField();
+  const d = G.me.distance;
+  const spin = performance.now() * 0.0021;
+
+  const first = Math.max(0, Math.floor(d / PICKUP.spacing) - 1);
+  const last = Math.floor((d + PICKUP.drawAhead) / PICKUP.spacing);
+
+  let slot = 0;
+  for (let index = first; index <= last && slot < COIN_CAP; index++) {
+    for (let k = 0; k < PICKUP.perCluster && slot < COIN_CAP; k++) {
+      const key = index * 16 + k;
+      if (G.pickups.get(key) === true) continue;          // toplanmış
+      const { x, z } = coinAt(index, k);
+      if (z < d - 20 || z > d + PICKUP.drawAhead) continue;
+
+      // Toplama: şerit ve mesafe kutusu — kaza kutusundan cömert.
+      if (G.phase === 'racing' && !G.me.crashed && !G.me.finished &&
+          Math.abs(z - d) < PICKUP.grabZ && Math.abs(x - G.me.x) < PICKUP.grabX) {
+        G.pickups.set(key, true);
+        collectCoin(x, z);
+        continue;
+      }
+
+      _coinPos.set(x, PICKUP.height, z);
+      _coinEuler.set(0, spin + k * 0.6, 0);
+      _coinQuat.setFromEuler(_coinEuler);
+      _coinMat4.compose(_coinPos, _coinQuat, _coinScale);
+      coinField.setMatrixAt(slot++, _coinMat4);
+    }
+  }
+
+  for (let i = slot; i < coinField.count; i++) coinField.setMatrixAt(i, COIN_HIDDEN);
+  coinField.count = slot;
+  coinField.instanceMatrix.needsUpdate = true;
+  void dt;
+}
+
+function collectCoin(x, z) {
+  G.purse.pickups += REWARDS.perCoinPickup;
+  bumpPurse();
+  if (fx) {
+    for (let i = 0; i < 14; i++) {
+      fx.flames.emit({
+        position: { x, y: PICKUP.height, z },
+        velocity: {
+          x: (Math.random() - 0.5) * 6,
+          y: Math.random() * 4 + 1,
+          z: (Math.random() - 0.5) * 6 - 2,
+        },
+        color: 0xffc233,
+        size: 7 + Math.random() * 6,
+        life: 0.35 + Math.random() * 0.25,
+        drag: 3.2, grow: 1.2, gravity: -6, peak: 0.08,
+      });
+    }
+  }
+}
+
+/* ============================== koşu kazancı ========================== */
+
+function runTotal() {
+  const p = G.purse;
+  return Math.round(p.distance + p.pickups + p.nearMiss);
+}
+
+function bumpPurse() {
+  if (!el.runCoins) return;
+  el.runCoins.textContent = runTotal().toLocaleString('tr-TR');
+  if (el.purseCard) {
+    el.purseCard.classList.remove('bump');
+    void el.purseCard.offsetWidth;
+    el.purseCard.classList.add('bump');
+  }
+}
+
+/**
+ * Sıyırarak geçiş: yakından geçilen her trafik aracı bir kez sayılır ve
+ * ardışık sıyırmalar seriye girerek katlanır.
+ */
+function checkNearMiss(raceTime, now) {
+  const me = G.me;
+  if (me.crashed || me.finished || me.speed < NEAR_MISS.minSpeed) return;
+
+  for (const car of G.traffic.values()) {
+    if (G.nearMissed.has(car.id)) continue;
+    const z = car.lastZ ?? trafficZ(car, raceTime);
+    const dz = z - me.distance;
+    // Aracı YENİ geçmiş olmalıyız: arkamızda ve yakın.
+    if (dz > 0 || dz < -NEAR_MISS.longitudinal) continue;
+    const dx = Math.abs(car.laneX - me.x);
+    if (dx > NEAR_MISS.lateral) continue;
+
+    G.nearMissed.add(car.id);
+    const p = G.purse;
+    p.streak = now - p.streakAt < NEAR_MISS.streakMs ? p.streak + 1 : 1;
+    p.streakAt = now;
+    const gain = REWARDS.perNearMiss + REWARDS.nearMissStreakBonus * (p.streak - 1);
+    p.nearMiss += gain;
+    bumpPurse();
+    if (p.streak > 1) feed(`SIYIRDIN ×${p.streak}  +${gain}`, 'good');
+    break;    // kare başına en fazla bir sayım — seri şişmesin
+  }
+}
+
 /* =========================== oyun yaşam döngüsü ======================== */
 
 function resetRace() {
+  applyLoadout();
+
   G.me = {
     distance: 0, speed: 0, x: laneX(1), lane: 1, targetLane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
+    nitro: 1, boosting: false,
   };
   G.rival.buffer.length = 0;
   G.rival.distance = 0; G.rival.x = laneX(2); G.rival.lateral = 0; G.rival.steer = 0;
@@ -1292,6 +1698,14 @@ function resetRace() {
 
   for (const car of G.traffic.values()) if (car.obj) releaseTrafficMesh(car.obj);
   G.traffic.clear();
+
+  G.purse = { distance: 0, pickups: 0, nearMiss: 0, streak: 0, streakAt: 0, total: 0, banked: false };
+  G.nearMissed.clear();
+  resetPickups();
+  bumpPurse();
+
+  if (fx) fx.reset();
+  if (scenery) scenery.reset();
 
   if (playerCar) {
     playerCar.position.set(laneX(1), 0, 0);
@@ -1316,13 +1730,18 @@ function startRacing() {
   show(el.hud, true);
 }
 
+/** Ortamı seç ve uygula. 'auto' ise yarış tohumundan türetilir. */
+function applyEnvironment(immediate = false) {
+  G.env = pickEnvironment(garage.state.environment, G.seed);
+  if (atmosphere) atmosphere.set(G.env, immediate);
+}
+
 /* ============================== çizim ================================== */
 
 const clock = new THREE.Clock();
 let fpsAcc = 0, fpsFrames = 0;
 const camTarget = new THREE.Vector3();
 const camPos = new THREE.Vector3(0, VIEW.camHeight, -VIEW.camBack);
-let shake = 0;
 
 // Kamera her zaman sabit adımlarla güncellenir; düşük FPS'te büyük/dengesiz
 // dt sıçramaları shake/lerp hesaplarını titretmesin diye (frame-rate bağımsız).
@@ -1363,18 +1782,42 @@ function tickPlayer(dt) {
     return;
   }
 
+  /* --- nitro ------------------------------------------------------------
+     Depo boşalınca boost kendiliğinden kesilir; tuş bırakılınca yavaşça
+     dolar. Boost yalnızca gaz basılıyken anlamlı, ama fren yaparken bile
+     depo dolmaz — nitroyu "bekleyip biriktirme" oyununa çevirmemek için. */
+  const wantBoost = input.nitro && me.nitro > (me.boosting ? 0 : NITRO.minToFire);
+  me.boosting = wantBoost && me.nitro > 0;
+  if (me.boosting) {
+    me.nitro = Math.max(0, me.nitro - dt / Math.max(NITRO.capacity, 0.1));
+    if (me.nitro <= 0) me.boosting = false;
+  } else if (!input.nitro) {
+    me.nitro = Math.min(1, me.nitro + NITRO.refill * dt);
+  }
+
+  const topSpeed = Math.min(
+    DRIVE.hardMaxSpeed,
+    DRIVE.maxSpeed * (me.boosting ? NITRO.boost : 1),
+  );
+
   /* --- boyuna ---------------------------------------------------------- */
-  if (input.throttle) {
+  if (input.throttle || me.boosting) {
     // 300 km/h (83.3 m/s) üstünde aerodinamik direnç: tırmanış kademeli.
     const drag = me.speed > 83.3
-      ? Math.max(0.12, (DRIVE.maxSpeed - me.speed) / 26.4)
+      ? Math.max(0.12, (topSpeed - me.speed) / 26.4)
       : 1;
-    me.speed += DRIVE.accel * drag * dt;
+    const accel = DRIVE.accel * (me.boosting ? NITRO.accelBoost : 1);
+    me.speed += accel * drag * dt;
   }
   else if (input.brakeKey) me.speed -= DRIVE.brake * dt;
   else me.speed -= DRIVE.coast * dt;
-  me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, DRIVE.maxSpeed);
+  // Boost bitince hız tavana doğru SÖNER, anında kesilmez.
+  if (me.speed > topSpeed) me.speed = Math.max(topSpeed, me.speed - 26 * dt);
+  me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, topSpeed);
+
+  const before = me.distance;
   me.distance += me.speed * dt;
+  G.purse.distance += (me.distance - before) * REWARDS.perMetre;
 
   /* --- yanal: şerit merkezine yay, hız tavanıyla sınırlı ---------------- */
   const goal = laneX(me.targetLane);
@@ -1418,6 +1861,36 @@ function tickPlayer(dt) {
     playerCar.rotation.y = me.yaw;
     poseBody(playerCar, me.roll, me.pitch);
     driveWheels(playerCar, me.speed, me.steer, dt);
+  }
+
+  emitDrivingFx(dt);
+}
+
+/**
+ * Sürüşün görsel "juice"u: nitro alevi, lastik dumanı ve fren izleri.
+ *
+ * Duman ve iz eşiği, sürücünün NE KADAR zorladığına bakar: hem sert fren
+ * hem de hızlı şerit değişimi (yüksek yanal hız) lastiği kaydırır. İkisinin
+ * büyüğü alınır, böylece frende dönerken efekt iki kez binmez.
+ */
+function emitDrivingFx(dt) {
+  if (!fx || !playerCar) return;
+  const me = G.me;
+  const u = playerCar.userData;
+  const car = {
+    x: me.x, z: me.distance, yaw: me.yaw,
+    halfWidth: u.width * 0.5, length: u.length, speed: me.speed,
+  };
+
+  if (me.boosting) fx.nitro(car, dt, 1);
+
+  const slip = Math.abs(me.lateral) / Math.max(DRIVE.laneChangeSpeed, 1);
+  const braking = input.brakeKey && me.speed > DRIVE.minSpeed * 2 ? 1 : 0;
+  const strain = Math.max(slip > 0.55 ? (slip - 0.55) / 0.45 : 0, braking * 0.85);
+
+  if (strain > 0.05) {
+    fx.tyreSmoke(car, dt, strain);
+    fx.laySkid(car, strain);
   }
 }
 
@@ -1477,7 +1950,15 @@ function crash(trafficId) {
   el.flash.classList.remove('hit');
   void el.flash.offsetWidth;
   el.flash.classList.add('hit');
-  shake = 1;
+  if (fx) {
+    fx.crash();
+    // Çarpma dumanı: kazanın nerede olduğunu gözle takip edilebilir kılar.
+    const u = playerCar ? playerCar.userData : { width: 1.9, length: 4.6 };
+    fx.tyreSmoke(
+      { x: me.x, z: me.distance, yaw: me.yaw, halfWidth: u.width * 0.5, length: u.length },
+      0.5, 1,
+    );
+  }
   feed('KAZA YAPTIN', 'bad');
   if (navigator.vibrate) navigator.vibrate(180);
 }
@@ -1528,36 +2009,39 @@ function tickRival(dt) {
   rivalCar.visible = G.rival.visible && gap < 260;
 }
 
+const _camWant = new THREE.Vector3();
+
 function tickCamera(dt) {
   const me = G.me;
-  const speedK = THREE.MathUtils.clamp((me.speed - DRIVE.minSpeed) / (DRIVE.maxSpeed - DRIVE.minSpeed), 0, 1);
+  const speedK = THREE.MathUtils.clamp(
+    (me.speed - DRIVE.minSpeed) / Math.max(DRIVE.maxSpeed - DRIVE.minSpeed, 1), 0, 1);
+  const boostK = me.boosting ? 1 : 0;
 
-  const want = new THREE.Vector3(
+  // Hız arttıkça kamera geri çekilir ve biraz yükselir; nitroda ekstra geri.
+  _camWant.set(
     me.x * 0.72,
     VIEW.camHeight + speedK * 0.35,
-    me.distance - VIEW.camBack - speedK * 1.8
+    me.distance - VIEW.camBack - speedK * VIEW.camBackSpeed - boostK * VIEW.camBackBoost,
   );
-  camPos.lerp(want, 1 - Math.exp(-7 * dt));
+  camPos.lerp(_camWant, 1 - Math.exp(-7 * dt));
 
-  if (shake > 0) {
-    shake = Math.max(0, shake - dt * 1.6);
-    const s = shake * shake * 0.85;
-    camPos.x += (Math.random() - 0.5) * s;
-    camPos.y += (Math.random() - 0.5) * s;
-  }
   camera.position.copy(camPos);
+  if (fx) {
+    const o = fx.shake.update(dt, me.speed, DRIVE.maxSpeed, me.boosting);
+    camera.position.add(o);
+  }
 
   camTarget.set(me.x * 0.35, 1.15, me.distance + VIEW.camLookAhead);
   camera.up.set(0, 1, 0);
   camera.lookAt(camTarget);
 
-  const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK;
+  const fov = VIEW.fovBase + (VIEW.fovMax - VIEW.fovBase) * speedK + VIEW.fovBoost * boostK;
   if (Math.abs(camera.fov - fov) > 0.05) {
-    camera.fov = THREE.MathUtils.damp(camera.fov, fov, 6, dt);
+    camera.fov = THREE.MathUtils.damp(camera.fov, fov, boostK ? 9 : 6, dt);
     camera.updateProjectionMatrix();
   }
 
-  el.speedlines.style.setProperty('--speed-lines', (speedK * 0.9).toFixed(2));
+  if (fx) fx.speedLines.update(dt, speedK, me.boosting);
 }
 
 function updateHUD() {
@@ -1586,6 +2070,12 @@ function updateHUD() {
 
   el.lanePips.forEach((pip, i) => pip.classList.toggle('active', i === me.lane));
 
+  if (el.nitroFill) {
+    el.nitroFill.style.width = `${(me.nitro * 100).toFixed(1)}%`;
+    el.nitro.classList.toggle('burning', me.boosting);
+    el.nitro.classList.toggle('empty', me.nitro < NITRO.minToFire);
+  }
+
   el.ping.textContent = String(Math.round(net.ping));
   el.ping.className = net.ping > 220 ? 'bad' : net.ping > 110 ? 'warn' : '';
 }
@@ -1609,10 +2099,19 @@ function frame() {
   const dt = Math.min(rawDt, 0.033);
   const now = performance.now();
 
-  fpsAcc += dt; fpsFrames++;
+  // FPS sayacı KIRPILMAMIŞ dt ile beslenir. `dt` 33 ms'de sınırlı olduğu için
+  // onunla hesaplamak, oyun 5 fps'e düşse bile ekranda hep "30" yazdırırdı —
+  // yani sayaç tam da işe yarayacağı anda kör kalırdı.
+  fpsAcc += rawDt; fpsFrames++;
   if (fpsAcc >= 0.5) {
     el.fps.textContent = String(Math.round(fpsFrames / fpsAcc));
     fpsAcc = 0; fpsFrames = 0;
+  }
+
+  // Garaj açıkken ana sahne hiç çizilmez: tek maliyet önizleme penceresidir.
+  if (garageScreen && garageScreen.open) {
+    garageScreen.renderFrame(dt);
+    return;
   }
 
   if (G.phase === 'countdown') {
@@ -1627,12 +2126,17 @@ function frame() {
     tickPlayer(dt);
     tickTraffic(G.raceTime, dt);
     checkCollisions(G.raceTime);
+    checkNearMiss(G.raceTime, now);
+    tickPickups(dt);
     tickRival(dt);
     sendState(now);
     updateHUD();
   }
 
   updateRoad(G.me.distance);
+  if (scenery) scenery.update(G.me.distance);
+  if (atmosphere) atmosphere.update(dt, { distance: G.me.distance, speed: G.me.speed });
+  if (fx) fx.update(dt);
 
   // Sabit zaman adımıyla kamera/shake güncelle; düşen FPS'te dt büyüyüp
   // titreşimi büyütmesin diye adım sayısı sınırlı, kalan pay bir sonraki kareye taşınır.
@@ -1695,6 +2199,8 @@ function holdSteer(now) {
 
 addEventListener('keydown', (e) => {
   if (e.target instanceof HTMLInputElement) return;
+  if (e.code === 'Escape' && garageScreen && garageScreen.open) { garageScreen.close(); return; }
+  if (garageScreen && garageScreen.open) return;     // garajda sürüş tuşları yok
   if (e.code.startsWith('Arrow')) e.preventDefault();
   if (e.repeat) return;
   switch (e.code) {
@@ -1702,6 +2208,7 @@ addEventListener('keydown', (e) => {
     case 'KeyD': case 'ArrowRight': input.right = true; laneShift(-1); break;
     case 'KeyW': case 'ArrowUp':    input.throttle = true; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = true; break;
+    case 'ShiftLeft': case 'ShiftRight': input.nitro = true; break;
     case 'Space':
       e.preventDefault();
       if (G.phase === 'room' && !el.btnReady.disabled) el.btnReady.click();
@@ -1715,7 +2222,13 @@ addEventListener('keyup', (e) => {
     case 'KeyD': case 'ArrowRight': input.right = false; break;
     case 'KeyW': case 'ArrowUp':    input.throttle = false; break;
     case 'KeyS': case 'ArrowDown':  input.brakeKey = false; break;
+    case 'ShiftLeft': case 'ShiftRight': input.nitro = false; break;
   }
+});
+
+// Sekme arkaya alınırsa tuşlar "basılı kalmasın".
+addEventListener('blur', () => {
+  input.left = input.right = input.throttle = input.brakeKey = input.nitro = false;
 });
 
 // dokunmatik: sol/sağ yarıya dokun şerit değiştir, basılı tut gaz ver
@@ -1773,6 +2286,30 @@ function renderRoom(room) {
   G.rival.id = rival ? rival.id : null;
   G.rival.visible = !!rival;
   if (rivalCar) rivalCar.visible = !!rival;
+
+  // Rakibin garaj donanımı değiştiyse hayalet aracı yeniden kur.
+  const next = rival && rival.loadout ? rival.loadout : null;
+  if (loadoutKey(next) !== loadoutKey(G.rival.loadout)) {
+    G.rival.loadout = next;
+    rebuildCars();
+    if (rivalCar) rivalCar.visible = !!rival;
+  }
+}
+
+/** İki donanımın görsel olarak aynı olup olmadığını ucuza karşılaştırır. */
+function loadoutKey(l) {
+  if (!l) return '';
+  const k = l.look || {};
+  return `${l.vehicle}|${k.finish}|${k.paint}|${k.underglow}|${k.underglowColor}|${k.tint}|${k.rim}`;
+}
+
+/** Kendi donanımımızı odaya bildir (rakip aracımızı doğru görsün). */
+function sendLoadout() {
+  if (!G.roomCode) return;
+  socket.emit('player:loadout', {
+    vehicle: garage.selected,
+    look: garage.look(garage.selected),
+  });
 }
 
 function enterRoomView() {
@@ -1798,6 +2335,7 @@ function joinRoom(code) {
     net.synced = true;
     renderRoom(res.room);
     enterRoomView();
+    sendLoadout();
     history.replaceState(null, '', res.inviteUrl);
   });
 }
@@ -1860,6 +2398,48 @@ el.btnQuit.addEventListener('click', () => {
   enterRoomView();
 });
 
+/* ---------------------------- garaj girişleri -------------------------- */
+
+/**
+ * Garaj, canvas'ın tamamını kendi çizimi için devralır. Bu yüzden altındaki
+ * ekranlar (lobi, oyun sonu, HUD) DOM'dan gizlenir; kapanışta hangisinden
+ * gelindiyse o geri açılır.
+ */
+let garageReturnTo = null;
+
+function openGarage() {
+  if (!garageScreen) { toast('Garaj hâlâ hazırlanıyor…', 'err'); return; }
+  garageReturnTo = el.gameover.classList.contains('hidden') ? 'lobby' : 'gameover';
+  show(el.lobby, false);
+  show(el.gameover, false);
+  show(el.hud, false);
+  if (fx) fx.speedLines.reset();
+  garageScreen.show();
+}
+
+function closeGarage() {
+  if (garageReturnTo === 'gameover') show(el.gameover, true);
+  else show(el.lobby, true);
+  garageReturnTo = null;
+}
+
+el.btnGarage?.addEventListener('click', openGarage);
+el.btnGarage2?.addEventListener('click', openGarage);
+
+// Garajda yapılan her değişiklik anında sürüşe, lobiye ve rakibe yansısın.
+garage.subscribe(() => {
+  applyLoadout();
+  refreshLobbyLoadout();
+  sendLoadout();
+
+  // Garaj AÇIKKEN pistteki aracı yeniden kurmuyoruz: önizleme kendi modelini
+  // yönetiyor ve renk sürgüsü saniyede onlarca olay üretiyor. Kapanışta
+  // `onClose` zaten kuruyor. Diğer her yol (kaydedilmiş durumun yüklenmesi,
+  // konsol/otomasyon, ileride eklenecek hızlı seçim) buradan yakalanır.
+  if (garageScreen && garageScreen.open) return;
+  if (currentLoadoutKey() !== builtLoadout) rebuildCars();
+});
+
 /* ========================== soket olay işleyicileri ==================== */
 
 socket.on('connect', () => {
@@ -1903,6 +2483,8 @@ socket.on('match:countdown', (data) => {
   net.synced = true;
 
   buildRoad();
+  bindWorldSystems();
+  applyEnvironment();
   resetRace();
 
   G.phase = 'countdown';
@@ -1953,10 +2535,53 @@ socket.on('player:finished', (p) => {
   }
 });
 
+/**
+ * Koşuyu kapat ve jetonları kalıcı cüzdana yatır.
+ *
+ * `banked` bayrağı çift ödemeye karşı: `match:over` ile `player:finished`
+ * arka arkaya gelebiliyor ve ikisi de burayı çağırabilir.
+ */
+function bankRun({ won = false, finished = false, crashed = false } = {}) {
+  const p = G.purse;
+  if (p.banked) return null;
+  p.banked = true;
+
+  const lines = [
+    { label: 'Mesafe', value: Math.round(p.distance) },
+    { label: 'Jetonlar', value: Math.round(p.pickups) },
+    { label: 'Sıyırma', value: Math.round(p.nearMiss) },
+  ];
+  if (finished) lines.push({ label: 'Bitiş', value: REWARDS.finishBonus });
+  if (won) lines.push({ label: 'Galibiyet', value: REWARDS.winBonus });
+  if (!crashed) lines.push({ label: 'Hasarsız', value: REWARDS.survivalBonus });
+
+  const total = lines.reduce((s, l) => s + l.value, 0);
+  garage.recordRun({ distance: G.me.distance, coins: total });
+  garage.flush();
+  return { lines, total };
+}
+
+function renderPayout(payout) {
+  if (!el.payout) return;
+  if (!payout) { el.payout.innerHTML = ''; return; }
+  el.payout.innerHTML =
+    payout.lines.filter((l) => l.value > 0).map((l) =>
+      `<span class="pay-item">${l.label}<b>+${l.value.toLocaleString('tr-TR')}</b></span>`).join('') +
+    `<span class="pay-item pay-total">Toplam<b>◈ ${payout.total.toLocaleString('tr-TR')}</b></span>`;
+}
+
 socket.on('match:over', (data) => {
   G.phase = 'over';
   const won = data.winnerId && data.winnerId === G.youId;
   const meResult = data.results.find((r) => r.id === G.youId);
+
+  const payout = bankRun({
+    won: !!won,
+    finished: !!(meResult && meResult.finished),
+    crashed: !!(meResult && meResult.crashed),
+  });
+  renderPayout(payout);
+  refreshLobbyLoadout();
 
   el.resultTitle.textContent = data.winnerId ? (won ? 'KAZANDIN!' : 'KAYBETTİN!') : 'BERABERE';
   el.resultTitle.className = `result-title ${data.winnerId ? (won ? 'win' : 'lose') : ''}`;
@@ -2004,21 +2629,72 @@ socket.on('room:error', ({ message }) => toast(message, 'err'));
 
 /* ================================ açılış =============================== */
 
+/**
+ * Manzara modelini yükler ve bina prefablarını kurar.
+ *
+ * Bu adım ASLA açılışı düşürmez: dosya 404 verse, bozuk olsa ya da GPU
+ * bellek ayıramasa bile `buildFallbackPrefabs()` devreye girip kanvasla
+ * üretilmiş pencereli kutu binalarla aynı arayüzü sağlar. Yarış her
+ * durumda başlar.
+ */
+async function loadScenery() {
+  try {
+    const gltf = await loadGLTF(SCENERY_MODEL);
+    const built = buildBuildingPrefabs(gltf);
+    if (!built.length) throw new Error('modelde bina bulunamadı');
+    if (DEBUG) console.log(`[manzara] ${built.length} bina prefabı hazır`);
+    return built;
+  } catch (err) {
+    console.warn('[manzara] new_york_buildings.glb yüklenemedi, yedek geometriye düşülüyor', err);
+    toast('Bina modeli yüklenemedi — basit siluetlere geçildi.', 'err');
+    return buildFallbackPrefabs();
+  } finally {
+    progress.scenery = 1;
+    setLoadProgress();
+  }
+}
+
+/** Yol her yarışta yeniden kurulduğu için atmosferin bağlarını tazeler. */
+function bindWorldSystems() {
+  if (!atmosphere) return;
+  atmosphere.bind({
+    roadMaterials: road.surfaceMaterials,
+    barrierMaterials: road.barrierMaterials,
+    lampMaterials: road.lampMaterials,
+    scenery,
+    roadWidth: roadWidth(),
+  });
+  if (scenery) scenery.setRoadWidth(roadWidth() / 2 + 2.2);
+
+  // Far donanımları araçlarla birlikte yeniden doğar; listeyi tazele.
+  atmosphere.clearHeadlights();
+  for (const car of [playerCar, rivalCar]) {
+    if (car && car.userData.headlights) atmosphere.addHeadlights(car.userData.headlights);
+  }
+}
+
 async function boot() {
   buildRoad();
 
   const gltfs = {};
-  await Promise.all(
-    LOAD_KEYS.map(async (k) => { gltfs[k] = await loadGLTF(MODELS[k]); })
-  );
+  const [, sceneryPrefabs] = await Promise.all([
+    Promise.all(LOAD_KEYS.map(async (k) => { gltfs[k] = await loadGLTF(MODELS[k]); })),
+    loadScenery(),
+  ]);
   for (const k of LOAD_KEYS) progress[k] = 1;
   setLoadProgress();
 
   // Ağır birleştirme adımından önce yükleme çubuğunun boyanmasına izin ver.
   await new Promise((r) => setTimeout(r, 30));
 
-  for (const k of LOAD_KEYS) {  
+  for (const k of LOAD_KEYS) {
     prefabs[k] = buildPrefab(gltfs[k], MODELS[k], { dropInterior: true });
+  }
+
+  // Prosedürel araçlar: indirilecek dosyası olmayan başlangıç araçları.
+  for (const v of Object.values(VEHICLE_BY_ID)) {
+    if (v.body !== 'proc') continue;
+    prefabs[v.id] = buildProceduralPrefab(v.proc, { measureLift });
   }
 
   // Trafik çarpışma kutuları modelin gerçek ölçüsünden türetilir; iki istemci
@@ -2031,11 +2707,32 @@ async function boot() {
     });
   }
 
-  playerCar = instantiate(prefabs.player, { paint: COLORS.you, underglow: COLORS.you });
-  rivalCar = instantiate(prefabs.player, { paint: COLORS.rival, underglow: COLORS.rival, lod: true });
-  rivalCar.visible = false;
-  world.add(playerCar, rivalCar);
+  /* --- alt sistemler --------------------------------------------------- */
+  atmosphere = new Atmosphere({ scene, renderer, camera, hemi, key, rim });
+  scenery = new SceneryField(sceneryPrefabs, world);
+  fx = new Fx(world, el.speedlines);
 
+  rebuildCars();
+  if (rivalCar) rivalCar.visible = false;
+
+  bindWorldSystems();
+  applyEnvironment(true);
+
+  garageScreen = new GarageScreen({
+    renderer,
+    // Garaj önizlemesi pistteki araçla AYNI kurulum hattını kullanır —
+    // orada gördüğün boya, cam filmi ve jant yarışta birebir aynı çıkar.
+    makeCar: (vehicleId, look) => makeCar(vehicleId, look, { lod: false, headlights: false }),
+    onEnvironmentChange: () => applyEnvironment(),
+    onClose: () => {
+      closeGarage();
+      refreshLobbyLoadout();
+      if (currentLoadoutKey() !== builtLoadout) rebuildCars();
+    },
+  });
+
+  applyLoadout();
+  refreshLobbyLoadout();
   resetRace();
   frame();
 
@@ -2058,3 +2755,127 @@ boot().catch((err) => {
   el.loadLabel.textContent = 'Oyun dosyaları yüklenemedi. Konsolu kontrol et.';
   toast('Varlıklar yüklenemedi — konsola bak.', 'err');
 });
+
+/* ============================ hata ayıklama ============================ */
+
+/* `?debug=1` ile açılan test kancası. Otomatik duman testleri (headless
+   tarayıcı) tek başına bir yarış başlatıp manzara/parçacık/atmosfer
+   yollarının gerçekten çalıştığını buradan doğruluyor. Normal oyunda bu
+   nesne hiç oluşturulmaz. */
+if (DEBUG) {
+  window.__cfs = {
+    G, DRIVE, NITRO, CONFIG,
+
+    /** Sunucusuz, tek kişilik bir yarış başlatır. */
+    startSolo(seed = 12345) {
+      G.seed = seed;
+      G.startAt = net.now();
+      show(el.lobby, false);
+      show(el.gameover, false);
+      show(el.countdown, false);
+      buildRoad();
+      bindWorldSystems();
+      applyEnvironment(true);
+      resetRace();
+
+      // Seyrek trafik: sıyırma ve çarpışma yolları çalışsın ama koşu
+      // ilk 100 metrede bitmesin diye yalnızca dış şeritlerde.
+      let id = 1;
+      for (let z = 160; z < 3000; z += 130) {
+        G.traffic.set(id, {
+          id, lane: id % 2 ? 0 : CONFIG.laneCount - 1,
+          laneX: laneX(id % 2 ? 0 : CONFIG.laneCount - 1),
+          z, speed: 22, model: TRAFFIC_MODELS[id % TRAFFIC_MODELS.length],
+          variant: id % 4, raceTime: 0, obj: null,
+        });
+        id++;
+      }
+      startRacing();
+    },
+
+    setEnv(envId, immediate = false) { if (atmosphere) atmosphere.set(envId, immediate); },
+
+    /** Sahnedeki araçların gerçekten hangi detay seviyesinde çizildiğini raporlar. */
+    cars() {
+      const scan = (root, label) => {
+        if (!root) return { label, missing: true };
+        let meshes = 0, tris = 0, lods = 0;
+        const mats = new Set();
+        root.traverse((o) => {
+          if (o.isLOD) lods++;
+          if (!o.isMesh || !o.geometry) return;
+          meshes++;
+          const g = o.geometry;
+          tris += (g.index ? g.index.count : (g.getAttribute('position')?.count || 0)) / 3;
+          mats.add(o.userData.materialName || (o.material && o.material.name) || '?');
+        });
+        return {
+          label, vehicle: root.userData.vehicleId, visible: root.visible,
+          meshes, tris: Math.round(tris), lods, materials: mats.size,
+          headlights: !!root.userData.headlights,
+          wheels: (root.userData.wheels || []).length,
+          z: Math.round(root.position.z),
+        };
+      };
+      return [scan(playerCar, 'player'), scan(rivalCar, 'rival')];
+    },
+
+    /**
+     * Oyun mantığını SABİT adımlarla, çizimden bağımsız olarak ilerletir.
+     *
+     * Yazılım rasterleştirici (headless CI) altında gerçek kare hızı 1-2 fps'e
+     * düşüyor; sürüş fiziğini gerçek zamanda test etmek imkânsız hale geliyor.
+     * Bu yardımcı, aynı tick fonksiyonlarını 60 Hz'lik sanal bir saatle
+     * çağırarak mesafe / nitro / jeton / sıyırma yollarının doğruluğunu
+     * çizim hızından bağımsız olarak ölçülebilir kılar.
+     */
+    drive({ seconds = 5, throttle = true, nitro = false, weave = 0 } = {}) {
+      const dt = 1 / 60;
+      const steps = Math.round(seconds / dt);
+      G.phase = 'racing';
+      input.throttle = throttle;
+      input.nitro = nitro;
+      for (let i = 0; i < steps; i++) {
+        if (weave && i % Math.round(weave / dt) === 0) {
+          laneShift(G.me.targetLane <= 0 ? 1 : -1);
+        }
+        G.raceTime = i * dt * 1000;
+        tickPlayer(dt);
+        tickTraffic(G.raceTime, dt);
+        checkNearMiss(G.raceTime, i * dt * 1000);
+        tickPickups(dt);
+        if (scenery) scenery.update(G.me.distance);
+      }
+      input.throttle = false;
+      input.nitro = false;
+      return this.snapshot();
+    },
+
+    snapshot() {
+      const info = renderer.info.render;
+      let sceneryInstances = 0;
+      if (scenery) for (const row of scenery.meshes) if (row[0]) sceneryInstances += row[0].count;
+      return {
+        phase: G.phase,
+        vehicle: garage.selected,
+        env: atmosphere ? atmosphere.id : null,
+        distance: Math.round(G.me.distance),
+        speedKph: Math.round(G.me.speed * 3.6),
+        topSpeedKph: Math.round(DRIVE.maxSpeed * 3.6),
+        nitro: Number(G.me.nitro.toFixed(2)),
+        purse: {
+          distance: Math.round(G.purse.distance),
+          pickups: G.purse.pickups,
+          nearMiss: G.purse.nearMiss,
+        },
+        coins: garage.coins,
+        traffic: G.traffic.size,
+        sceneryInstances,
+        coinsOnRoad: coinField ? coinField.count : 0,
+        drawCalls: info.calls,
+        triangles: info.triangles,
+        fps: Number(el.fps.textContent),
+      };
+    },
+  };
+}

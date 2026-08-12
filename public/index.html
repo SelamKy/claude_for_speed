@@ -4,7 +4,8 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#05070d" />
-<title>Trafik Düellosu — 2 Kişilik Otoyol Yarışı</title>
+<title>Claude for Speed — 2 Kişilik Otoyol Yarışı</title>
+<link rel="icon" type="image/png" href="/favicon.png" />
 <link rel="preconnect" href="https://unpkg.com" />
 <link rel="stylesheet" href="/style.css" />
 <link rel="preload" as="fetch" href="/models/bmw_m3_competition.glb" crossorigin />
@@ -15,12 +16,13 @@
   <canvas id="scene"></canvas>
   <div id="vignette" aria-hidden="true"></div>
   <div id="speedlines" aria-hidden="true"></div>
+  <div id="rainlayer" aria-hidden="true"></div>
 
   <!-- ============================== YÜKLEME ============================= -->
   <section id="loading" class="screen">
     <div class="loader-box">
       <div class="logo">
-        <span class="logo-main">TRAFİK</span><span class="logo-accent">DÜELLO</span>
+        <span class="logo-main">CLAUDE</span><span class="logo-accent">FOR SPEED</span>
       </div>
       <div class="bar"><i id="load-bar"></i></div>
       <p id="load-label" class="muted">Motorlar ısıtılıyor…</p>
@@ -33,7 +35,7 @@
 
       <header class="lobby-head">
         <div class="logo">
-          <span class="logo-main">TRAFİK</span><span class="logo-accent">DÜELLO</span>
+          <span class="logo-main">CLAUDE</span><span class="logo-accent">FOR SPEED</span>
         </div>
         <p class="tagline">İki araba. Dört şerit. Tek hayatta kalan.</p>
       </header>
@@ -51,6 +53,12 @@
                  placeholder="XYZ123" aria-label="Oda kodu" />
           <button id="btn-join" type="submit" class="btn">Odaya Katıl</button>
         </form>
+
+        <button id="btn-garage" class="btn btn-ghost btn-garage">
+          <span class="btn-glyph">◈</span> Garaj &amp; Dükkân
+          <em id="lobby-coins" class="wallet-mini">0</em>
+        </button>
+        <p id="lobby-loadout" class="muted status"></p>
       </div>
 
       <!-- --- oda: davet + hazır --- -->
@@ -86,8 +94,61 @@
         <span><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> şerit değiştir</span>
         <span><kbd>W</kbd> gaz</span>
         <span><kbd>S</kbd> fren</span>
+        <span><kbd>SHIFT</kbd> nitro</span>
       </footer>
       <p class="credit-line">Geliştirici: Abdülselam Kaya</p>
+    </div>
+  </section>
+
+  <!-- ============================== GARAJ =============================== -->
+  <section id="garage" class="screen hidden">
+    <div class="garage-shell">
+
+      <header class="garage-head">
+        <button id="garage-back" class="btn btn-ghost">‹ Lobiye Dön</button>
+        <div class="logo garage-logo">
+          <span class="logo-main">GARAJ</span><span class="logo-accent">&amp; DÜKKÂN</span>
+        </div>
+        <div class="wallet" title="Jetonların">
+          <i class="coin">◈</i><span id="wallet-coins">0</span>
+        </div>
+      </header>
+
+      <div class="garage-body">
+
+        <!-- araç listesi -->
+        <aside id="vehicle-list" class="vehicle-list" aria-label="Araçlar"></aside>
+
+        <!-- 3B önizleme -->
+        <div class="garage-stage">
+          <div id="preview-stage" class="preview-stage" aria-label="Araç önizlemesi"></div>
+          <div class="stage-info">
+            <h3 id="veh-name">—</h3>
+            <span id="veh-tag" class="veh-tag"></span>
+            <p id="veh-blurb" class="muted"></p>
+          </div>
+          <div class="stage-actions">
+            <button id="btn-buy" class="btn btn-primary hidden"></button>
+            <button id="btn-select" class="btn hidden"></button>
+          </div>
+          <p id="garage-note" class="garage-note"></p>
+        </div>
+
+        <!-- sekmeli paneller -->
+        <aside class="garage-panels">
+          <nav class="tabs">
+            <button class="tab active" data-tab="stats">Özet</button>
+            <button class="tab" data-tab="tune">Parça</button>
+            <button class="tab" data-tab="style">Stil</button>
+            <button class="tab" data-tab="env">Ortam</button>
+          </nav>
+          <div id="tab-stats" class="tab-body"></div>
+          <div id="tab-tune" class="tab-body hidden"></div>
+          <div id="tab-style" class="tab-body hidden"></div>
+          <div id="tab-env" class="tab-body hidden"></div>
+        </aside>
+
+      </div>
     </div>
   </section>
 
@@ -116,6 +177,11 @@
         <div id="gap" class="gap">—</div>
       </div>
 
+      <div class="hud-card purse-card">
+        <div class="purse-row"><i class="coin">◈</i><span id="run-coins">0</span></div>
+        <div class="purse-sub muted">Bu koşu</div>
+      </div>
+
       <div class="hud-card net-card">
         <div class="net-row"><span class="muted">Gecikme (Ping)</span><span id="ping">--</span><span class="unit">ms</span></div>
         <div class="net-row"><span class="muted">Kare / sn</span><span id="fps">--</span></div>
@@ -131,6 +197,12 @@
         </svg>
         <div class="speed-value"><span id="speed">0</span><small>Hız (km/s)</small></div>
       </div>
+
+      <div class="nitro">
+        <div class="nitro-bar"><i id="nitro-fill"></i></div>
+        <div class="nitro-label"><kbd>SHIFT</kbd> NITRO</div>
+      </div>
+
       <div id="lane-pips" class="lane-pips">
         <i></i><i></i><i></i><i></i>
       </div>
@@ -146,8 +218,10 @@
       <h2 id="result-title" class="result-title">YARIŞ BİTTİ</h2>
       <p id="result-sub" class="muted"></p>
       <ol id="result-list" class="result-list"></ol>
+      <div id="payout" class="payout"></div>
       <div class="result-actions">
         <button id="btn-rematch" class="btn btn-primary btn-lg">Yeniden Oyna</button>
+        <button id="btn-garage-2" class="btn btn-ghost">Garaj</button>
         <button id="btn-quit" class="btn btn-ghost">Lobiye Dön</button>
       </div>
       <p id="rematch-status" class="muted status"></p>
@@ -167,7 +241,7 @@
     }
   }
   </script>
-  <script type="module" src="/game.js?v=1.0.1"></script>
-  <noscript><p class="noscript">Trafik Düellosu için JavaScript ve WebGL gerekir.</p></noscript>
+  <script type="module" src="/game.js?v=1.1.0"></script>
+  <noscript><p class="noscript">Claude for Speed için JavaScript ve WebGL gerekir.</p></noscript>
 </body>
 </html>

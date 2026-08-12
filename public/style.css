@@ -1,5 +1,5 @@
 /* =====================================================================
-   Traffic Duel — UI shell
+   Claude for Speed — UI shell
    Dark arcade overlay rendered on top of the full-screen WebGL canvas.
    ===================================================================== */
 
@@ -51,12 +51,53 @@ html, body {
 #speedlines {
   position: fixed; inset: 0; pointer-events: none; z-index: 2;
   opacity: var(--speed-lines, 0);
-  transition: opacity 180ms linear;
   background:
     repeating-linear-gradient(90deg, transparent 0 38px, rgba(180, 235, 255, 0.10) 38px 39px),
     radial-gradient(60% 60% at 50% 50%, transparent 40%, rgba(120, 210, 255, 0.10) 100%);
   -webkit-mask-image: radial-gradient(58% 58% at 50% 50%, transparent 55%, #000 100%);
           mask-image: radial-gradient(58% 58% at 50% 50%, transparent 55%, #000 100%);
+}
+
+/* Warp layer: radial streaks that only appear on nitro / redline.
+   `--warp` is written every frame from fx.js, so no CSS transition here —
+   a transition would fight the per-frame updates and smear the response. */
+#speedlines::after {
+  content: ''; position: absolute; inset: -20%;
+  opacity: var(--warp, 0);
+  background:
+    repeating-conic-gradient(from 0deg at 50% 50%,
+      rgba(210, 245, 255, 0) 0deg 1.1deg,
+      rgba(210, 245, 255, 0.30) 1.1deg 1.35deg,
+      rgba(210, 245, 255, 0) 1.35deg 2.6deg);
+  -webkit-mask-image: radial-gradient(42% 42% at 50% 50%, transparent 30%, #000 92%);
+          mask-image: radial-gradient(42% 42% at 50% 50%, transparent 30%, #000 92%);
+  transform: scale(calc(1 + var(--warp, 0) * 0.14));
+  filter: blur(0.4px);
+}
+
+/* Rain curtain: driven by --rain from atmosphere.js. Two drifting layers of
+   slanted streaks plus a few "stuck on the windscreen" droplets. */
+#rainlayer {
+  position: fixed; inset: 0; pointer-events: none; z-index: 3;
+  opacity: calc(var(--rain, 0) * 0.55);
+  background:
+    repeating-linear-gradient(104deg, transparent 0 6px, rgba(200, 232, 255, 0.16) 6px 7px, transparent 7px 15px),
+    repeating-linear-gradient(97deg, transparent 0 11px, rgba(180, 220, 255, 0.10) 11px 12px, transparent 12px 26px);
+  background-size: 190px 260px, 300px 420px;
+  animation: rainFall 0.62s linear infinite;
+}
+#rainlayer::after {
+  content: ''; position: absolute; inset: 0;
+  background:
+    radial-gradient(6px 9px at 18% 24%, rgba(220, 240, 255, 0.35), transparent 70%),
+    radial-gradient(5px 8px at 63% 14%, rgba(220, 240, 255, 0.30), transparent 70%),
+    radial-gradient(8px 12px at 82% 61%, rgba(220, 240, 255, 0.26), transparent 70%),
+    radial-gradient(4px 7px at 35% 72%, rgba(220, 240, 255, 0.30), transparent 70%),
+    radial-gradient(7px 10px at 47% 41%, rgba(220, 240, 255, 0.22), transparent 70%);
+  opacity: 0.9;
+}
+@keyframes rainFall {
+  to { background-position: -60px 260px, -34px 420px; }
 }
 
 .hidden { display: none !important; }
@@ -415,7 +456,302 @@ kbd {
 
 .noscript { position: fixed; inset: 0; display: grid; place-items: center; z-index: 99; }
 
+/* ======================================================================
+   GARAGE & SHOP
+   ====================================================================== */
+
+.coin { color: var(--warn); font-style: normal; text-shadow: 0 0 12px rgba(255, 176, 32, 0.55); }
+
+.btn-garage { margin-top: 4px; border-color: rgba(255, 176, 32, 0.32); }
+.btn-garage:hover:not(:disabled) { border-color: rgba(255, 176, 32, 0.6); }
+.wallet-mini {
+  margin-left: auto; font-family: var(--mono); font-style: normal;
+  color: var(--warn); letter-spacing: 0.04em;
+}
+
+/* The preview is drawn straight into the main WebGL canvas, so this screen
+   must NOT paint a backdrop of its own — a full-screen background would sit
+   between the canvas and the "stage window" and hide the car. Instead the
+   canvas is cleared to a flat dark colour by garage-ui.js each frame, and
+   only the individual chrome panels below carry a background. */
+#garage {
+  z-index: 30; padding: 0;
+  background: none;
+  align-items: stretch;
+}
+.garage-shell { display: flex; flex-direction: column; width: 100%; height: 100%; padding: 16px 20px 18px; gap: 14px; }
+
+/* While the garage is open the in-race screen overlays must not bleed over it. */
+body.garage-open #speedlines,
+body.garage-open #rainlayer { opacity: 0 !important; }
+
+.garage-head {
+  display: flex; align-items: center; gap: 16px;
+  background: rgba(6, 10, 18, 0.86);
+  border: 1px solid var(--panel-line);
+  border-radius: 14px; padding: 10px 16px;
+  backdrop-filter: blur(8px);
+}
+.garage-logo { font-size: clamp(20px, 3vw, 30px); flex: 1; justify-content: flex-start; }
+.wallet {
+  display: flex; align-items: center; gap: 9px;
+  background: rgba(255, 176, 32, 0.08);
+  border: 1px solid rgba(255, 176, 32, 0.28);
+  border-radius: 99px; padding: 9px 18px;
+  font-family: var(--mono); font-size: 18px; font-weight: 800; letter-spacing: 0.04em;
+}
+
+.garage-body {
+  flex: 1; min-height: 0;
+  display: grid; grid-template-columns: 250px minmax(0, 1fr) 340px; gap: 14px;
+}
+
+/* ----------------------------- vehicle list --------------------------- */
+
+.vehicle-list {
+  display: flex; flex-direction: column; gap: 10px; overflow-y: auto;
+  background: rgba(6, 10, 18, 0.82);
+  border: 1px solid var(--panel-line);
+  border-radius: 14px; padding: 10px;
+  backdrop-filter: blur(8px);
+}
+.veh-card {
+  appearance: none; cursor: pointer; text-align: left;
+  display: flex; flex-direction: column; gap: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-left: 3px solid rgba(255, 255, 255, 0.12);
+  border-radius: 12px; padding: 13px 15px;
+  color: var(--text); font-family: var(--font);
+  transition: background 160ms, border-color 160ms, transform 120ms;
+}
+.veh-card:hover { background: rgba(255, 255, 255, 0.07); transform: translateX(2px); }
+.veh-card.viewing { border-color: var(--you); border-left-color: var(--you); box-shadow: 0 0 24px var(--you-dim); }
+.veh-card.equipped { border-left-color: var(--good); }
+.veh-card.locked { opacity: 0.72; }
+.vc-top, .vc-bottom { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.vc-name { font-weight: 800; letter-spacing: 0.03em; font-size: 14.5px; min-width: 0; }
+.vc-tag {
+  flex: none; white-space: nowrap;
+  font-size: 9px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted);
+  border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 99px; padding: 2px 7px;
+}
+.vc-price { font-family: var(--mono); font-size: 13px; color: var(--warn); display: inline-flex; gap: 5px; align-items: center; }
+.vc-owned { font-size: 10px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--good); }
+.veh-card.equipped .vc-owned { color: var(--good); font-weight: 700; }
+.vc-tune { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+
+/* ------------------------------- stage -------------------------------- */
+
+.garage-stage { display: flex; flex-direction: column; min-height: 0; gap: 12px; }
+/* Transparent on purpose — the car is rendered into the canvas behind it. */
+.preview-stage {
+  flex: 1; min-height: 220px; border-radius: 14px;
+  border: 1px solid var(--panel-line);
+  background: transparent;
+  cursor: grab; touch-action: none;
+  box-shadow: inset 0 0 60px rgba(0, 0, 0, 0.5);
+}
+.preview-stage:active { cursor: grabbing; }
+
+/* Sits over the transparent preview window, so it needs its own scrim. */
+.stage-info {
+  text-align: center;
+  background: rgba(6, 10, 18, 0.72);
+  border: 1px solid var(--panel-line);
+  border-radius: 12px; padding: 10px 16px;
+  backdrop-filter: blur(6px);
+}
+.stage-info h3 { font-size: clamp(20px, 3vw, 28px); font-weight: 800; letter-spacing: 0.08em; display: inline-block; }
+.stage-info .veh-tag { margin-left: 10px; vertical-align: middle; }
+.stage-info p { margin-top: 6px; font-size: 13px; }
+.stage-actions { display: flex; gap: 12px; justify-content: center; }
+.garage-note { text-align: center; font-size: 12.5px; min-height: 17px; letter-spacing: 0.04em; }
+.garage-note.ok { color: var(--good); }
+.garage-note.err { color: var(--rival); }
+
+/* ------------------------------- panels ------------------------------- */
+
+.garage-panels {
+  display: flex; flex-direction: column; min-height: 0;
+  background: rgba(6, 10, 18, 0.86);
+  border: 1px solid var(--panel-line);
+  border-radius: 14px; overflow: hidden;
+  backdrop-filter: blur(8px);
+}
+.tabs { display: flex; border-bottom: 1px solid rgba(255, 255, 255, 0.08); }
+/* Four Turkish labels in a 290 px column: they must be allowed to shrink,
+   otherwise "ORTAM" gets clipped off the end of the strip. */
+.tab {
+  flex: 1 1 0; min-width: 0; appearance: none; cursor: pointer;
+  background: transparent; border: none; border-bottom: 2px solid transparent;
+  color: var(--muted); font-family: var(--font); font-weight: 700;
+  font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase;
+  padding: 13px 6px; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+  transition: color 150ms, border-color 150ms, background 150ms;
+}
+.tab:hover { color: var(--text); background: rgba(255, 255, 255, 0.04); }
+.tab.active { color: var(--you); border-bottom-color: var(--you); }
+.tab-body { flex: 1; overflow-y: auto; padding: 16px; }
+.panel-hint { color: var(--muted); font-size: 11.5px; line-height: 1.55; margin-top: 14px; }
+.panel-hint.warn { color: var(--warn); }
+
+/* stats */
+.stat-list { list-style: none; display: flex; flex-direction: column; gap: 14px; }
+.stat-row { display: grid; grid-template-columns: 82px 1fr 96px; align-items: center; gap: 10px; }
+.stat-name { font-size: 11px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.stat-bar { position: relative; height: 7px; border-radius: 99px; background: rgba(255, 255, 255, 0.07); overflow: hidden; }
+.stat-bar .cap { position: absolute; inset: 0 auto 0 0; background: rgba(255, 255, 255, 0.13); }
+.stat-bar .fill {
+  position: absolute; inset: 0 auto 0 0;
+  background: linear-gradient(90deg, var(--you), var(--rival));
+  box-shadow: 0 0 14px rgba(34, 224, 255, 0.4);
+  transition: width 220ms ease;
+}
+.stat-val { font-family: var(--mono); font-size: 12px; text-align: right; }
+.delta { margin-left: 6px; font-size: 10px; }
+.delta.up { color: var(--good); }
+.delta.down { color: var(--rival); }
+
+/* upgrades */
+.tune-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+.tune-row {
+  display: grid; grid-template-columns: 30px 1fr auto; align-items: center; gap: 11px;
+  background: rgba(255, 255, 255, 0.035);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 11px; padding: 12px;
+}
+.tune-icon { font-size: 18px; color: var(--you); text-align: center; }
+.tune-main { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.tune-name { font-size: 13px; font-weight: 700; letter-spacing: 0.03em; white-space: nowrap; }
+.tune-name b { color: var(--you); font-family: var(--mono); font-size: 11px; margin-left: 4px; }
+.tune-desc { font-size: 10.5px; color: var(--muted); }
+.tune-pips { display: flex; gap: 4px; margin-top: 2px; }
+.tune-pips i { width: 20px; height: 4px; border-radius: 99px; background: rgba(255, 255, 255, 0.12); }
+.tune-pips i.on { background: var(--you); box-shadow: 0 0 10px var(--you); }
+.btn-sm { padding: 8px 12px; font-size: 11.5px; font-family: var(--mono); letter-spacing: 0.04em; }
+
+/* style */
+.style-block { margin-bottom: 20px; }
+.style-block h4 {
+  display: flex; align-items: center; gap: 10px;
+  font-size: 10.5px; letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--muted); margin-bottom: 10px; font-weight: 700;
+}
+.chip-row { display: flex; flex-wrap: wrap; gap: 7px; }
+.chip {
+  appearance: none; cursor: pointer;
+  background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 99px; padding: 7px 13px;
+  color: var(--muted); font-family: var(--font); font-size: 11.5px;
+  letter-spacing: 0.06em; font-weight: 700;
+  display: inline-flex; align-items: center; gap: 7px;
+  transition: color 150ms, border-color 150ms, background 150ms;
+}
+.chip:hover { color: var(--text); background: rgba(255, 255, 255, 0.09); }
+.chip.active { color: var(--text); border-color: var(--you); background: var(--you-dim); }
+.chip.rim i { width: 12px; height: 12px; border-radius: 50%; background: var(--sw); border: 1px solid rgba(255, 255, 255, 0.25); }
+
+.swatch-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(38px, 1fr)); gap: 8px; margin-top: 10px; }
+.swatch-grid.dim { opacity: 0.4; }
+.swatch {
+  appearance: none; cursor: pointer;
+  aspect-ratio: 1; border-radius: 9px;
+  background: var(--sw);
+  border: 2px solid rgba(255, 255, 255, 0.14);
+  transition: transform 140ms, border-color 140ms, box-shadow 140ms;
+}
+.swatch:hover { transform: scale(1.08); }
+.swatch.active { border-color: #fff; box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.6), 0 0 18px var(--sw); }
+
+.switch { margin-left: auto; position: relative; display: inline-block; width: 40px; height: 21px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch span {
+  position: absolute; inset: 0; cursor: pointer; border-radius: 99px;
+  background: rgba(255, 255, 255, 0.12); transition: background 180ms;
+}
+.switch span::before {
+  content: ''; position: absolute; left: 3px; top: 3px; width: 15px; height: 15px;
+  border-radius: 50%; background: var(--text); transition: transform 180ms;
+}
+.switch input:checked + span { background: var(--you); box-shadow: 0 0 14px var(--you-dim); }
+.switch input:checked + span::before { transform: translateX(19px); }
+
+/* environment */
+.env-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 10px; }
+.env-card {
+  appearance: none; cursor: pointer; text-align: left;
+  display: flex; flex-direction: column; gap: 6px;
+  background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.09);
+  border-radius: 11px; padding: 11px; color: var(--text); font-family: var(--font);
+  transition: border-color 150ms, background 150ms;
+}
+.env-card:hover { background: rgba(255, 255, 255, 0.08); }
+.env-card.active { border-color: var(--you); box-shadow: 0 0 22px var(--you-dim); }
+.env-swatch { height: 40px; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.1); }
+.env-auto { background: linear-gradient(120deg, #4a90e2, #ff9d4d 38%, #0d1730 72%, #2b3644); }
+.env-day { background: linear-gradient(180deg, #2f7fd4, #d6e8fb); }
+.env-sunset { background: linear-gradient(180deg, #1d3a6b, #ff9d4d); }
+.env-night { background: linear-gradient(180deg, #02040a, #1a2c4d); }
+.env-rain { background: linear-gradient(180deg, #0b1119, #46586b); }
+.env-name { font-weight: 800; font-size: 13px; letter-spacing: 0.06em; }
+.env-hint { font-size: 10.5px; color: var(--muted); }
+
+/* ------------------------- HUD: nitro + purse ------------------------- */
+
+.purse-card { display: flex; flex-direction: column; justify-content: center; min-width: 112px; }
+.purse-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 20px; font-weight: 800; }
+.purse-sub { font-size: 9.5px; letter-spacing: 0.16em; text-transform: uppercase; }
+.purse-card.bump { animation: purseBump 340ms ease-out; }
+@keyframes purseBump {
+  0% { transform: scale(1); } 35% { transform: scale(1.09); border-color: var(--warn); } 100% { transform: scale(1); }
+}
+
+.nitro { width: 220px; display: flex; flex-direction: column; align-items: center; gap: 5px; margin-top: -8px; }
+.nitro-bar {
+  width: 100%; height: 8px; border-radius: 99px;
+  background: rgba(255, 255, 255, 0.08); border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+.nitro-bar > i {
+  display: block; height: 100%; width: 0%;
+  background: linear-gradient(90deg, #2f6bff, #9fd8ff);
+  box-shadow: 0 0 16px rgba(95, 176, 255, 0.7);
+  transition: width 90ms linear;
+}
+.nitro.burning .nitro-bar > i { background: linear-gradient(90deg, #ff7a1a, #ffd23f); box-shadow: 0 0 22px rgba(255, 176, 32, 0.8); }
+.nitro.empty .nitro-bar > i { background: rgba(255, 255, 255, 0.2); box-shadow: none; }
+.nitro-label { font-size: 9.5px; letter-spacing: 0.2em; color: var(--muted); text-transform: uppercase; }
+
+/* ------------------------------- payout ------------------------------- */
+
+.payout {
+  display: flex; flex-wrap: wrap; gap: 8px; justify-content: center;
+  margin: -8px 0 22px;
+}
+.payout .pay-item {
+  display: inline-flex; align-items: baseline; gap: 7px;
+  background: rgba(255, 176, 32, 0.07);
+  border: 1px solid rgba(255, 176, 32, 0.2);
+  border-radius: 99px; padding: 7px 14px;
+  font-size: 12px; letter-spacing: 0.04em;
+}
+.payout .pay-item b { font-family: var(--mono); color: var(--warn); }
+.payout .pay-total { background: rgba(255, 176, 32, 0.16); border-color: rgba(255, 176, 32, 0.5); font-weight: 800; }
+
 /* ----------------------------- responsive ----------------------------- */
+
+@media (max-width: 1080px) {
+  .garage-body { grid-template-columns: 210px minmax(0, 1fr) 290px; }
+}
+
+@media (max-width: 860px) {
+  .garage-body { grid-template-columns: 1fr; grid-template-rows: auto minmax(200px, 1fr) minmax(0, 1.1fr); }
+  .vehicle-list { flex-direction: row; overflow-x: auto; overflow-y: hidden; padding-bottom: 6px; }
+  .veh-card { min-width: 168px; }
+  .stage-info p { display: none; }
+}
 
 @media (max-width: 620px) {
   .panel { padding: 26px 20px 20px; }
@@ -423,7 +759,9 @@ kbd {
   .net-card { flex-direction: row; justify-content: space-between; }
   .speedo { width: 180px; height: 108px; }
   .speed-value { font-size: 36px; }
+  .nitro { width: 180px; }
   .room-code { font-size: 26px; }
+  .garage-shell { padding: 12px; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -1,7 +1,7 @@
 'use strict';
 
 /**
- * Traffic Duel — authoritative game server
+ * Claude for Speed — authoritative game server
  *
  *  - Serves the client from /public
  *  - Creates / joins 2-player rooms via invite links (/?room=XYZ123)
@@ -70,9 +70,13 @@ const CONFIG = {
   COUNTDOWN_MS: 3000,
   TICK_MS: 50,               // spawn scheduler resolution
   STATE_RATE_LIMIT_MS: 20,   // ignore player updates faster than 50 Hz
+  LOADOUT_RATE_LIMIT_MS: 300, // cosmetic loadout updates are rare — throttle hard
   EMPTY_ROOM_TTL_MS: 60000,  // reap rooms nobody joined
   ROOM_SWEEP_MS: 30000,
-  MAX_SPEED_SANITY: 130,     // m/s — used to reject impossible progress reports
+  // m/s — rejects impossible progress reports. Must stay above the client's
+  // DRIVE.hardMaxSpeed (122 m/s, nitro included) or a legitimate flat-out run
+  // would be clamped and the player would appear to rubber-band backwards.
+  MAX_SPEED_SANITY: 140,
 };
 
 const ROOM_CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no I/O/0/1
@@ -191,6 +195,39 @@ function publicPlayer(p) {
     crashed: p.crashed,
     finished: p.finished,
     score: p.score,
+    // Purely cosmetic: which garage car/paint the opponent should be drawn with.
+    loadout: p.loadout,
+  };
+}
+
+/**
+ * Validates a client-supplied garage loadout.
+ *
+ * This is cosmetic data that goes straight back out to the other player, so it
+ * gets whitelisted rather than trusted: unknown keys are dropped, colours are
+ * clamped to 24-bit integers and strings are length-capped. A tampered client
+ * can make its own car ugly, but it cannot inject anything into the peer.
+ */
+function sanitizeLoadout(raw) {
+  if (!raw || typeof raw !== 'object') return null;
+  const id = typeof raw.vehicle === 'string' ? raw.vehicle.slice(0, 24) : null;
+  if (!id || !/^[a-z0-9_-]+$/i.test(id)) return null;
+
+  const src = raw.look && typeof raw.look === 'object' ? raw.look : {};
+  const colour = (n) => (isFiniteNumber(n) ? (Math.floor(n) & 0xffffff) : 0xffffff);
+  const word = (s, fallback) =>
+    (typeof s === 'string' && /^[a-z0-9_-]{1,16}$/i.test(s) ? s : fallback);
+
+  return {
+    vehicle: id,
+    look: {
+      finish: word(src.finish, 'gloss'),
+      paint: colour(src.paint),
+      underglow: !!src.underglow,
+      underglowColor: colour(src.underglowColor),
+      tint: isFiniteNumber(src.tint) ? Math.max(0, Math.min(3, Math.floor(src.tint))) : 1,
+      rim: word(src.rim, 'stock'),
+    },
   };
 }
 
@@ -582,6 +619,8 @@ io.on('connection', (socket) => {
       finishTime: null,
       score: 0,
       lastStateAt: 0,
+      loadout: null,
+      lastLoadoutAt: 0,
     };
 
     room.players.set(socket.id, player);
@@ -615,6 +654,28 @@ io.on('connection', (socket) => {
     if (typeof ack === 'function') ack({ ok: true, ready: player.ready });
     broadcastRoom(room);
     tryStartMatch(room);
+  });
+
+  /**
+   * Cosmetic loadout (garage car + paint). Broadcast through the room snapshot
+   * so a player who joins later still sees the right car, without needing a
+   * separate handshake. Rate-limited because the garage colour picker can fire
+   * on every click.
+   */
+  socket.on('player:loadout', (payload) => {
+    const room = currentRoom();
+    if (!room) return;
+    const player = room.players.get(socket.id);
+    if (!player) return;
+
+    const now = Date.now();
+    if (now - player.lastLoadoutAt < CONFIG.LOADOUT_RATE_LIMIT_MS) return;
+    player.lastLoadoutAt = now;
+
+    const clean = sanitizeLoadout(payload);
+    if (!clean) return;
+    player.loadout = clean;
+    broadcastRoom(room);
   });
 
   /**
@@ -754,7 +815,7 @@ const sweeper = setInterval(() => {
 }, CONFIG.ROOM_SWEEP_MS);
 
 server.listen(CONFIG.PORT, () => {
-  log(`Traffic Duel server listening on http://localhost:${CONFIG.PORT}`);
+  log(`Claude for Speed server listening on http://localhost:${CONFIG.PORT}`);
 });
 
 function shutdown(signal) {
