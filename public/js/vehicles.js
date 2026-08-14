@@ -3,8 +3,9 @@
    ---------------------------------------------------------------------
    İki iş yapar:
 
-   1) `buildProceduralPrefab()` — indirilecek dosyası olmayan araçları
-      (Hatchback, Kas Araba) koddan üretir. Çıktı, game.js'teki
+   1) `buildProceduralPrefab()` — koddan üretilen yedek gövde. Garajdaki
+      araçların HEPSİ artık gerçek .glb modeli kullanıyor; bu yol yalnızca
+      bir model indirilemediğinde devreye girer. Çıktı, game.js'teki
       `buildPrefab()` ile BİREBİR aynı arayüzü sunar: `bodyPivot` +
       `wheelRoot` hiyerarşisi ve aynı userData alanları. Böylece
       `instantiate()`, `poseBody()`, `driveWheels()` hiçbir dala ihtiyaç
@@ -36,13 +37,6 @@ const PROFILES = {
     cabin: [[0.16, 0.54], [0.02, 0.92], [-0.24, 0.95], [-0.36, 0.56]],
     roof: { from: -0.24, to: 0.02, y: 0.945 },
     wheel: { front: 0.31, rear: -0.30, radius: 0.325 },
-  },
-  muscle: {
-    lower: [[0.50, 0.18], [0.50, 0.34], [0.44, 0.44], [0.06, 0.47],
-            [-0.36, 0.50], [-0.48, 0.46], [-0.50, 0.34], [-0.50, 0.18]],
-    cabin: [[0.06, 0.47], [-0.08, 0.82], [-0.28, 0.85], [-0.38, 0.50]],
-    roof: { from: -0.28, to: -0.08, y: 0.845 },
-    wheel: { front: 0.33, rear: -0.31, radius: 0.355 },
   },
 };
 
@@ -252,7 +246,7 @@ export function buildProceduralPrefab(spec, deps = {}) {
 
   holder.userData = {
     width: W,
-    height: H * (spec.shape === 'muscle' ? 0.85 : 0.95),
+    height: H * 0.95,
     length: L,
     rollCentre,
     liftTable,

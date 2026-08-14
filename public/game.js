@@ -43,7 +43,8 @@ const DRACO_CDN = `https://unpkg.com/three@${THREE_VERSION}/examples/jsm/libs/dr
 }
 /* Değerler gönderilen .glb dosyalarından ölçüldü. `faceYaw` her modeli
    burnu +Z'ye bakacak şekilde döndürür:
-     BMW  — farlar z = -1.65, stoplar z = +1.94   -> 180° çevir
+     BMW      — farlar z = -1.65, stoplar z = +1.94   -> 180° çevir
+     ilkaraba — kaput z = +4.65, bagaj z = -3.18      -> zaten doğru
      npc1 — farlar x = -113, stoplar x = +194     -> +90° çevir (uzun eksen X)
      npc2 — beyaz far x = +2.63, kırmızı x = -2.74 -> -90° çevir (uzun eksen X)
      npc3 — kırmızı cam z = -0.02                 -> zaten doğru
@@ -58,6 +59,26 @@ const MODELS = {
     length: 4.72,
     weight: 0.374,          // yükleme çubuğundaki payı (indirme boyutuna göre)
     interiorSkin: 0.15,     // tam gövde kabuğu kalsın: bu araç ekranı doldurur
+  },
+
+  /* Başlangıç aracı — Şehir Hatchback. Artık kutu geometrisi değil, gerçek
+     model: models/ilkaraba.glb (Sketchfab "Cartoon Car", CC-BY-4.0).
+     Ölçüm: kabuk 7.90 × 5.02 × 12.53 birim, kaput +Z ucunda -> faceYaw = 0.
+     Boya malzemesi `car_body`; modelde zaten KHR_materials_clearcoat var,
+     yani garajdaki "Parlak" kaplama vernik katmanını gerçekten sürüyor. */
+  ilkaraba: {
+    key: 'ilkaraba',
+    url: '/models/ilkaraba.glb',
+    faceYaw: 0,
+    paint: /^car_body$/,
+    length: 4.05,           // hatchback: garajın en kısa aracı
+    weight: 0.845,          // 10.7 MB — çubuktaki payı buna göre
+    interiorSkin: 0.15,     // kabini olmayan model: hiçbir parçası atılmaz
+    /* Karikatür oranları: teker çapı gövde boyunun %24'ü, genel eşiğin
+       (%22) üstünde. Bu tavan yükseltilmezse dört teker de "tekerlek
+       değil" sayılıp gövdeye kaynar — ne dönerler ne de direksiyon
+       kırarlar. %26 dört tekerleği alır, tamponu/egzozu almaz. */
+    wheelShape: { maxDiameter: 0.26 },
   },
 
   /* Garajdaki ikinci gerçek model — Spor Coupe.
@@ -119,7 +140,7 @@ const SCENERY_MODEL = { key: 'scenery', url: '/models/new_york_buildings.glb', w
 const TRAFFIC_MODELS = ['npc1', 'npc2', 'npc3'];
 
 /** Garajdaki gerçek (indirilen) araç modelleri. */
-const PLAYER_MODELS = ['player', 'skyline'];
+const PLAYER_MODELS = ['player', 'skyline', 'ilkaraba'];
 
 /** İlk karede GÖRÜNEN modeller: seçili araç + varsayılan rakip (bmw). */
 const ESSENTIAL_KEYS = [...new Set(
@@ -712,17 +733,20 @@ function bakeGeometry(mesh, matrix) {
  * parçaların hepsi tekerlek biçiminde mi diye bakılır (yuvarlak, aks boyunca
  * ince, araç boyuna oranla makul çapta). Böyle olmayan bir parça — taban sacı,
  * egzoz, tavandaki yedek lastik — gövdede kalır.
+ *
+ * `shape` eşikleri model başına gevşetilebilir (MODELS[].wheelShape): karikatür
+ * oranlı gövdelerde teker çapı gerçekçi modellerin iki katı olabiliyor.
  */
-function extractWheels(parts, shell, lateralAxis, lengthAxis) {
+function extractWheels(parts, shell, lateralAxis, lengthAxis, shape = WHEEL_SHAPE) {
   const centre = shell.getCenter(new THREE.Vector3());
   const size = shell.getSize(new THREE.Vector3());
   const lat = { x: 0, y: 1, z: 2 }[lateralAxis];
   const lon = { x: 0, y: 1, z: 2 }[lengthAxis];
   const cLat = centre.getComponent(lat);
   const cLon = centre.getComponent(lon);
-  const lowY = shell.min.y + size.y * WHEEL_SHAPE.lowFraction;
-  const minDia = size[lengthAxis] * WHEEL_SHAPE.minDiameter;
-  const maxDia = size[lengthAxis] * WHEEL_SHAPE.maxDiameter;
+  const lowY = shell.min.y + size.y * shape.lowFraction;
+  const minDia = size[lengthAxis] * shape.minDiameter;
+  const maxDia = size[lengthAxis] * shape.maxDiameter;
 
   // çeyrek -> Map(malzeme -> geometri[])
   const buckets = [new Map(), new Map(), new Map(), new Map()];
@@ -765,8 +789,8 @@ function extractWheels(parts, shell, lateralAxis, lengthAxis) {
     let rejected = false;
     for (let q = 0; q < 4 && !rejected; q++) {
       if (!out[q].length) continue;
-      if (out[q].length < WHEEL_SHAPE.noiseTris &&
-          out[q].length < triCount * WHEEL_SHAPE.noiseFraction) continue;
+      if (out[q].length < shape.noiseTris &&
+          out[q].length < triCount * shape.noiseFraction) continue;
 
       const lo = [Infinity, Infinity, Infinity];
       const hi = [-Infinity, -Infinity, -Infinity];
@@ -785,8 +809,8 @@ function extractWheels(parts, shell, lateralAxis, lengthAxis) {
       const dia = Math.max(sY, sLonE);
       const round = Math.min(sY, sLonE) / Math.max(dia, 1e-9);
 
-      if (round > WHEEL_SHAPE.roundness &&
-          sLatE < dia * WHEEL_SHAPE.thinness &&
+      if (round > shape.roundness &&
+          sLatE < dia * shape.thinness &&
           dia > minDia && dia < maxDia) {
         looksLikeWheel = true;
       } else {
@@ -939,6 +963,120 @@ function measureLift(bodyNorm, rollCentre, rollMax = BODY.rollMax, pitchMax = BO
   return { roll: rolls, pitch: pitches, lift };
 }
 
+/* ------------------------ PBR malzeme cilası --------------------------- */
+
+/* Her .glb kendi sanatçısının ayarlarıyla geliyor: kimi doku sRGB
+   işaretlenmemiş, kiminde anizotropik filtre yok (jant yazıları eğik açıdan
+   bulanıklaşıyor), kimi kaporta metalness = 0 ile mat plastik gibi duruyor.
+   Aşağıdaki geçiş üç garaj aracını da (Süper Coupe, Spor Coupe, Şehir
+   Hatchback) ve trafiği AYNI hattan geçirir, böylece hiçbir araç ötekinin
+   yanında "başka bir oyundan gelmiş" gibi görünmez. */
+
+/** Aynı malzeme/doku onlarca mesh'te paylaşılır — her birini bir kez işle. */
+const tunedMaterials = new WeakSet();
+const tunedTextures = new WeakSet();
+
+let _maxAniso = 0;
+function maxAnisotropy() {
+  if (!_maxAniso) _maxAniso = renderer.capabilities.getMaxAnisotropy() || 1;
+  return _maxAniso;
+}
+
+/**
+ * Bir dokuyu oyunun renk hattına oturtur.
+ *
+ * RENK dokuları (albedo, emissive) sRGB'dir. Normal / metalness-roughness /
+ * AO dokuları VERİdir ve doğrusal kalmak zorundadır — sRGB işaretlenirlerse
+ * three onları bir kez daha gamma'lar, yüzey plastikleşir.
+ *
+ * Anizotropi asfalt gibi eğik bakılan yüzeylerde belirleyici: yol dokusu
+ * zaten maksimuma çekiliyordu, araçlarınki 1'de kalmıştı.
+ */
+function tuneTexture(tex, srgb) {
+  if (!tex || tunedTextures.has(tex)) return;
+  tunedTextures.add(tex);
+  tex.colorSpace = srgb ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+  tex.anisotropy = maxAnisotropy();
+  tex.generateMipmaps = true;
+  tex.minFilter = THREE.LinearMipmapLinearFilter;
+  tex.magFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+}
+
+const GLASS_RE = /glass|window|windshield|windscreen|vitre/i;
+const LAMP_RE = /head ?light|tail ?light|lamp|stop/i;
+const CHROME_RE = /chrome|krom|mirror/i;
+const TYRE_RE = /tyre|tire|rubber|lastik/i;
+
+const clamp01 = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+/**
+ * Tek bir malzemeyi hizalar: dokular yukarıdaki kurala göre, sayısal
+ * değerler ise malzemenin ne olduğuna göre (kaporta / cam / krom / lastik).
+ * Uçları budamak amaç: roughness 0 kaportayı ayna, 1 ise tebeşir yapıyor;
+ * ikisi de aynı sahnedeki öteki araçların yanında sırıtıyor.
+ */
+function tuneMaterial(mat, cfg) {
+  if (!mat || tunedMaterials.has(mat)) return;
+  tunedMaterials.add(mat);
+
+  const name = mat.name || '';
+
+  tuneTexture(mat.map, true);
+  tuneTexture(mat.emissiveMap, true);
+  tuneTexture(mat.specularColorMap, true);
+  tuneTexture(mat.sheenColorMap, true);
+  for (const t of [mat.normalMap, mat.roughnessMap, mat.metalnessMap, mat.aoMap,
+    mat.alphaMap, mat.clearcoatNormalMap, mat.clearcoatRoughnessMap]) tuneTexture(t, false);
+
+  if (!('roughness' in mat)) return;      // MeshBasic vb.: PBR alanı yok
+
+  // Sahnenin IBL'i (RoomEnvironment) hem pistte hem garajda aynı; şiddeti de
+  // aynı olsun ki araç garajdan piste geçerken renk atlaması olmasın.
+  mat.envMapIntensity = 1.15;
+
+  const lamp = LAMP_RE.test(name);
+  if (lamp) { mat.needsUpdate = true; return; }   // farlara dokunma
+
+  if (TYRE_RE.test(name)) {
+    mat.metalness = 0;
+    mat.roughness = clamp01(mat.roughness ?? 0.9, 0.70, 0.95);
+  } else if (GLASS_RE.test(name)) {
+    mat.metalness = 0.12;
+    mat.roughness = clamp01(mat.roughness ?? 0.05, 0.02, 0.12);
+  } else if (CHROME_RE.test(name)) {
+    mat.metalness = 1;
+    mat.roughness = clamp01(mat.roughness ?? 0.10, 0.04, 0.22);
+  } else if (cfg.paint && cfg.paint.test(name)) {
+    // Kaporta: garajdaki kaplama seçimi (applyLook) bunun ÜSTÜNE yazar; bu
+    // değerler boyanmamış/trafik örneklerinin taban görünümü.
+    mat.metalness = clamp01(mat.metalness ?? 0.8, 0.55, 1);
+    mat.roughness = clamp01(mat.roughness ?? 0.2, 0.08, 0.35);
+    if ('clearcoat' in mat) {
+      mat.clearcoat = Math.max(mat.clearcoat ?? 0, 1);
+      mat.clearcoatRoughness = clamp01(mat.clearcoatRoughness ?? 0.05, 0.02, 0.12);
+    }
+  } else if (!mat.roughnessMap) {
+    mat.roughness = clamp01(mat.roughness ?? 0.6, 0.08, 0.90);
+  }
+
+  mat.needsUpdate = true;
+}
+
+/** Bir prefabın bütün mesh/malzemelerini PBR hattından geçirir. */
+function tunePrefabMaterials(root, cfg) {
+  root.traverse((o) => {
+    if (!o.isMesh) return;
+    // Gölge haritası pistte kapalı (araç başına bir blob doku kullanıyoruz);
+    // bayraklar yine de doğru olsun ki garajda/ileride açıldığında araç
+    // gölgesiz kalmasın.
+    o.castShadow = true;
+    o.receiveShadow = false;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) tuneMaterial(m, cfg);
+  });
+}
+
 /**
  * Sketchfab tarzı bir GLTF'i (yüzlerce minik mesh) malzeme başına bir mesh'e
  * indirger. Çizim çağrılarını ~250'den ~40'a düşürür ve her trafik örneğinin
@@ -974,7 +1112,8 @@ function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
   const lateralAxis = lengthAxis === 'x' ? 'z' : 'x';
 
   /* 3 — tekerlekleri ayıkla; geri kalanı gövdedir -------------------------- */
-  const { wheels, used } = extractWheels(parts, shell, lateralAxis, lengthAxis);
+  const wheelShape = cfg.wheelShape ? { ...WHEEL_SHAPE, ...cfg.wheelShape } : WHEEL_SHAPE;
+  const { wheels, used } = extractWheels(parts, shell, lateralAxis, lengthAxis, wheelShape);
   const bodyParts = parts.filter((p) => !used.has(p));
 
   /* 4 — gövdeyi malzeme başına birleştir ---------------------------------- */
@@ -1133,6 +1272,9 @@ function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
   for (const w of wheels) {
     w.userData.isFront = (w.userData.lon - centreLon) * frontSign > 0;
   }
+
+  /* 7 — ortak PBR cilası: sRGB dokular, tam anizotropi, ölçülü metal/pürüz -- */
+  tunePrefabMaterials(holder, cfg);
 
   holder.userData = {
     width,
@@ -1429,6 +1571,11 @@ function spawnTrafficMesh(model, variant) {
     return pooled;
   }
 
+  // Trafik modelleri arka planda iniyor; yarış onlar bitmeden başlayabilir.
+  // O karede araç çizilmez, bir sonrakinde tekrar denenir — çağıran `null`
+  // dönüşünü zaten karşılıyor. (Eskiden burada her karede istisna atılıyordu.)
+  if (!prefabs[name]) return null;
+
   const mesh = instantiate(prefabs[name], { paint: COLORS.traffic[v], tailGlow: true, lod: true });
   mesh.userData.poolKey = key;
   world.add(mesh);
@@ -1453,11 +1600,15 @@ function hitFor(model) {
 /** Şu anki aracın türetilmiş istatistikleri (araç tabanı + yükseltmeler). */
 let stats = computeStats(garage.selected, garage.entry(garage.selected).upgrades);
 
-/** Bir araç kimliği için 3B prefab. Prosedürel araçlarda indirme yoktur. */
+/**
+ * Bir araç kimliği için 3B prefab. Garajdaki araçların hepsi .glb; `prefabs[v.id]`
+ * yalnızca indirme başarısız olduğunda (prosedürel yedek) dolar.
+ */
 function prefabFor(vehicleId) {
   const v = VEHICLE_BY_ID[vehicleId];
   if (!v) return prefabs.player || null;
-  return prefabs[v.body === 'glb' ? v.model : v.id] || null;
+  if (v.body === 'glb') return prefabs[v.model] || prefabs[v.id] || null;
+  return prefabs[v.id] || null;
 }
 
 /**
@@ -2742,8 +2893,13 @@ function loadDeferredAssets(keys) {
   // Trafik + ertelenmiş araçlar: hepsi aynı anda iner, her biri kendi
   // indirmesi biter bitmez prefab'a dönüşür (ağ ile CPU örtüşür).
   trafficReady = Promise.all(keys.map(async (k) => {
-    const gltf = await loadGLTF(MODELS[k]);
-    prefabs[k] = buildPrefab(gltf, MODELS[k], { dropInterior: true });
+    try {
+      const gltf = await loadGLTF(MODELS[k]);
+      prefabs[k] = buildPrefab(gltf, MODELS[k], { dropInterior: true });
+    } catch (err) {
+      console.warn(`[model] ${MODELS[k].url} yüklenemedi`, err);
+      buildFallbackFor(k);
+    }
     progress[k] = 1;
     setLoadProgress();
   })).then(() => {
@@ -2765,6 +2921,19 @@ function loadDeferredAssets(keys) {
   return trafficReady;
 }
 
+/**
+ * Bir .glb indirilemediğinde devreye giren yedek: o modeli kullanan aracın
+ * `proc` tarifi varsa prosedürel gövdesini kurar. Normal akışta ÇAĞRILMAZ —
+ * garajdaki araçların hepsi gerçek modeli gösterir.
+ */
+function buildFallbackFor(modelKey) {
+  for (const v of Object.values(VEHICLE_BY_ID)) {
+    if (v.model !== modelKey || !v.proc || prefabs[v.id]) continue;
+    prefabs[v.id] = buildProceduralPrefab(v.proc, { measureLift });
+    toast(`${v.name} modeli inemedi — basit gövdeye geçildi.`, 'err');
+  }
+}
+
 async function boot() {
   buildRoad();
 
@@ -2780,13 +2949,21 @@ async function boot() {
   setLoadProgress();
 
   await Promise.all(essentialKeys.map(async (k) => {
-    const gltf = await loadGLTF(MODELS[k]);
-    prefabs[k] = buildPrefab(gltf, MODELS[k], { dropInterior: true });
+    try {
+      const gltf = await loadGLTF(MODELS[k]);
+      prefabs[k] = buildPrefab(gltf, MODELS[k], { dropInterior: true });
+    } catch (err) {
+      // Tek bir model inemedi diye açılış düşmesin: o aracın prosedürel
+      // yedeği varsa ona düş, yoksa prefabFor() başka bir modele kayar.
+      console.warn(`[model] ${MODELS[k].url} yüklenemedi`, err);
+      buildFallbackFor(k);
+    }
     progress[k] = 1;
     setLoadProgress();
   }));
 
-  // Prosedürel araçlar: indirilecek dosyası olmayan başlangıç araçları.
+  // Prosedürel araçlar: indirilecek dosyası olmayan araçlar (şu an yok —
+  // garajdaki her araç gerçek modeli kullanıyor).
   for (const v of Object.values(VEHICLE_BY_ID)) {
     if (v.body !== 'proc') continue;
     prefabs[v.id] = buildProceduralPrefab(v.proc, { measureLift });

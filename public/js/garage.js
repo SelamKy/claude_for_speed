@@ -37,20 +37,14 @@ export const VEHICLES = [
     name: 'Şehir Hatchback',
     tag: 'Başlangıç',
     price: 0,
-    body: 'proc',
+    body: 'glb',
+    model: 'ilkaraba',
+    // Ağ hatası için emniyet kemeri: `ilkaraba.glb` inemezse istemci bu
+    // prosedürel gövdeye düşer ve oyun yine de açılır. Normal akışta HİÇ
+    // üretilmez — game.js sadece catch dalında buna bakar.
     proc: { shape: 'hatch', length: 4.05, width: 1.76, height: 1.48, spoiler: false },
     stats: { topSpeed: 72, accel: 12.0, brake: 28, grip: 0.92, nitro: { capacity: 1.6, boost: 1.10, refill: 0.16 } },
     blurb: 'Ucuz, hafif ve affedici. Şehirden çıkmak için yeterli.',
-  },
-  {
-    id: 'muscle',
-    name: 'Kas Araba',
-    tag: 'Klasik',
-    price: 4800,
-    body: 'proc',
-    proc: { shape: 'muscle', length: 5.02, width: 1.96, height: 1.38, spoiler: true },
-    stats: { topSpeed: 84, accel: 17.5, brake: 30, grip: 0.78, nitro: { capacity: 2.3, boost: 1.13, refill: 0.13 } },
-    blurb: 'Düz yolda canavar, virajda inatçı. Gazı sevenler için.',
   },
   {
     id: 'skyline',
