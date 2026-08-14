@@ -92,6 +92,16 @@ export class ScreenShake {
 /* ============================== hız çizgileri ========================= */
 
 /**
+ * Ekran kaplamalarının opaklık TAVANI.
+ *
+ * Bu iki sayı oyunun okunabilirlik sözleşmesi: nitro basılıyken bile yol,
+ * yaklaşan trafik ve rakip %100 görünür kalmalı. Katmanların "his" tarafı
+ * (kaç çizgi, ne kadar yayılma) CSS'te; buradaki değerler ne kadarının
+ * ekrana bindiğini sınırlar. 0.2'nin üstüne çıkarmayın.
+ */
+export const OVERLAY_CAP = { lines: 0.18, warp: 0.20 };
+
+/**
  * Ekran üstündeki warp/çizgi katmanını sürer. Tüm iş CSS'te olduğu için
  * WebGL'e hiç dokunmaz; yalnızca iki özel özellik yazılır.
  */
@@ -121,12 +131,15 @@ export class SpeedLines {
     const linesTarget = Math.max(0, (speedK - 0.55) / 0.45) ** 1.4;
     const warpTarget = boosting ? 1 : Math.max(0, (speedK - 0.88) / 0.12);
 
+    // Nitroda bile yumuşak bir rampa: eski 14/s'lik yaklaşım tuşa basıldığı
+    // an ekranı "patlatıyordu". 7/s ile katman görünür bir flaş olmadan açılır.
     const k = 1 - Math.exp(-8 * dt);
     this.lines += (linesTarget - this.lines) * k;
-    this.warp += (warpTarget - this.warp) * (boosting ? 1 - Math.exp(-14 * dt) : k);
+    this.warp += (warpTarget - this.warp) * (boosting ? 1 - Math.exp(-7 * dt) : k);
 
-    this.node.style.setProperty('--speed-lines', this.lines.toFixed(3));
-    this.node.style.setProperty('--warp', this.warp.toFixed(3));
+    // 0..1'lik iç seviyeler ekrana yalnızca tavanla ölçeklenerek yazılır.
+    this.node.style.setProperty('--speed-lines', (this.lines * OVERLAY_CAP.lines).toFixed(4));
+    this.node.style.setProperty('--warp', (this.warp * OVERLAY_CAP.warp).toFixed(4));
   }
 }
 
@@ -201,6 +214,10 @@ export class ParticlePool {
     this.grow = new Float32Array(count);
     this.gravity = new Float32Array(count);
     this.peak = new Float32Array(count);
+    // Parçacık başına alfa tavanı. Ömür zarfı hep 0..1 arasında çalışır, bu
+    // dizi onu ölçekler — böylece nitro alevi kısılabilirken duman ve jeton
+    // kıvılcımları tam parlaklıkta kalır.
+    this.amp = new Float32Array(count);
 
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(this.pos, 3));
@@ -246,8 +263,12 @@ export class ParticlePool {
    * @param {number} [o.grow]    saniyede boy artışı (çarpan)
    * @param {number} [o.gravity] m/s²  (+ yukarı)
    * @param {number} [o.peak]    0..1 — alfanın tepe yaptığı ömür oranı
+   * @param {number} [o.opacity] 0..1 — parçacığın alfa tavanı
    */
-  emit({ position, velocity, color, size, life, drag = 2.4, grow = 1.4, gravity = 0, peak = 0.15 }) {
+  emit({
+    position, velocity, color, size, life,
+    drag = 2.4, grow = 1.4, gravity = 0, peak = 0.15, opacity = 1,
+  }) {
     const i = this.cursor;
     this.cursor = (this.cursor + 1) % this.count;
     const i3 = i * 3;
@@ -270,11 +291,12 @@ export class ParticlePool {
     this.grow[i] = grow;
     this.gravity[i] = gravity;
     this.peak[i] = peak;
+    this.amp[i] = opacity;
     this.alpha[i] = 0.001;
   }
 
   update(dt) {
-    const { pos, vel, size, alpha, life, maxLife, drag, grow, gravity, peak } = this;
+    const { pos, vel, size, alpha, life, maxLife, drag, grow, gravity, peak, amp } = this;
     let live = 0;
     for (let i = 0; i < this.count; i++) {
       if (life[i] <= 0) { if (alpha[i] !== 0) alpha[i] = 0; continue; }
@@ -293,9 +315,10 @@ export class ParticlePool {
 
       size[i] *= 1 + (grow[i] - 1) * dt;
 
-      // Alfa zarfı: hızlı açıl, yavaş kapan.
+      // Alfa zarfı: hızlı açıl, yavaş kapan — sonra parçacığın tavanıyla ölçekle.
       const t = 1 - life[i] / maxLife[i];
-      alpha[i] = t < peak[i] ? t / Math.max(peak[i], 1e-3) : 1 - (t - peak[i]) / (1 - peak[i]);
+      const env = t < peak[i] ? t / Math.max(peak[i], 1e-3) : 1 - (t - peak[i]) / (1 - peak[i]);
+      alpha[i] = env * amp[i];
     }
 
     if (live || this._wasLive) {
@@ -484,8 +507,35 @@ const TMP_COLOR = new THREE.Color();
 
 /* ============================== FX yöneticisi ========================= */
 
-const NITRO_COLORS = [0x9fd8ff, 0x5fb0ff, 0x2f6bff];
+/* Egzoz alevi: sıcak mavi-beyaz uçtan koyu mavi kuyruğa. Eskisinden bir tık
+   daha koyu — additive harmanda üst üste binince beyaza patlamasın diye. */
+const NITRO_COLORS = [0x8ec9ff, 0x4a8dff, 0x2246c8];
 const SMOKE_COLOR = 0x9aa3ae;
+
+/**
+ * Nitro jetinin biçimi.
+ *
+ * En kritik değer `carry`: egzoz gazı aracın hızının bu kadarını ÜSTLENİR,
+ * yani parçacık dünyada durmaz, araçla birlikte ileri gider. Eskiden hız
+ * taşınmıyordu; 120 m/s'te parçacıklar araca göre saniyede 120 m geri
+ * kaçıyor, ömürleri boyunca 40 m'lik bir kuyruk çiziyor ve kameranın
+ * içinden geçerken ekranı kaplayan devasa parlak lekelere dönüşüyordu.
+ * `carry` ile bağıl kayma ~30 m/s'e iner: alev egzoz uçlarında, bir araç
+ * boyu kadar arkada kalır.
+ */
+const NITRO_FX = {
+  rate: 140,          // saniyede parçacık — küçük parçacıklarla sürekli jet
+  carry: 0.90,        // araç hızının taşınan oranı
+  exit: 7,            // m/s — egzozdan çıkış kayması (üstüne 0..5 rastgele)
+  sideOffset: 0.42,   // yarı genişliğin oranı — egzoz uçlarının yeri
+  height: 0.34,       // m — tampon altı egzoz yüksekliği
+  spread: 0.9,        // m/s — yanal saçılma
+  size: 2.8,          // px taban (üstüne 0..1.8 rastgele)
+  grow: 1.9,
+  drag: 1.4,
+  life: 0.09,         // s (üstüne 0..0.09 rastgele)
+  opacity: 0.44,      // alfa tavanı — parlak ama arkayı yakmayan bir uç
+};
 
 const _v = new THREE.Vector3();
 
@@ -525,38 +575,48 @@ export class Fx {
    */
   nitro(car, dt, strength = 1) {
     if (strength <= 0.01) return;
-    // Kare hızından bağımsız doğum oranı: saniyede ~160 parçacık.
-    this._nitroAcc += dt * 160 * strength;
+    // Kare hızından bağımsız doğum oranı.
+    this._nitroAcc += dt * NITRO_FX.rate * strength;
     const n = Math.floor(this._nitroAcc);
     this._nitroAcc -= n;
 
+    // Aracın yerel eksenleri: ileri = (sin, cos), sağ = (cos, -sin).
     const sin = Math.sin(car.yaw), cos = Math.cos(car.yaw);
+    const oz = -car.length * 0.5;
+    // Gazın dünya hızı: aracın ileri hızının çoğunu taşır, üstüne egzozdan
+    // çıkış kayması binmez — çıkarılır (araca göre GERİ gider).
+    const along = car.speed * NITRO_FX.carry;
+
     for (let i = 0; i < n; i++) {
       const side = i % 2 ? 1 : -1;
-      const ox = side * car.halfWidth * 0.52;
-      const oz = -car.length * 0.5;
+      const ox = side * car.halfWidth * NITRO_FX.sideOffset;
       const px = car.x + ox * cos + oz * sin;
       const pz = car.z - ox * sin + oz * cos;
 
-      const spread = 1.6;
-      const back = 12 + Math.random() * 10;
+      const back = along - (NITRO_FX.exit + Math.random() * 5);
+      const lateral = (Math.random() - 0.5) * NITRO_FX.spread + side * 0.35;
       _v.set(
-        (Math.random() - 0.5) * spread - car.speed * 0.0 * sin,
-        (Math.random() - 0.2) * 1.2,
-        -back + car.speed * 0.02,
+        back * sin + lateral * cos,
+        (Math.random() - 0.35) * 0.5,
+        back * cos - lateral * sin,
       );
 
       const t = Math.random();
-      const color = NITRO_COLORS[t < 0.45 ? 0 : t < 0.8 ? 1 : 2];
+      const color = NITRO_COLORS[t < 0.35 ? 0 : t < 0.75 ? 1 : 2];
       this.flames.emit({
-        position: { x: px, y: 0.44 + Math.random() * 0.12, z: pz },
+        position: {
+          x: px,
+          y: NITRO_FX.height + Math.random() * 0.08,
+          z: pz,
+        },
         velocity: _v,
         color,
-        size: 9 + Math.random() * 9,
-        life: 0.16 + Math.random() * 0.20,
-        drag: 5.5,
-        grow: 3.4,
-        peak: 0.10,
+        size: NITRO_FX.size + Math.random() * 1.8,
+        life: NITRO_FX.life + Math.random() * 0.09,
+        drag: NITRO_FX.drag,
+        grow: NITRO_FX.grow,
+        peak: 0.14,
+        opacity: NITRO_FX.opacity * strength,
       });
     }
   }

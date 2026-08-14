@@ -19,7 +19,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 import { SceneryField, buildBuildingPrefabs, buildFallbackPrefabs } from './js/scenery.js';
-import { Atmosphere, pickEnvironment } from './js/atmosphere.js';
+import { Atmosphere, pickEnvironment, FOG_READABILITY } from './js/atmosphere.js';
 import { Fx } from './js/fx.js';
 import { buildProceduralPrefab, applyLook, makeHeadlights } from './js/vehicles.js';
 import { GarageScreen } from './js/garage-ui.js';
@@ -411,8 +411,16 @@ renderer.toneMapping = THREE.ACESFilmicToneMapping;
 renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x070b14);
-scene.fog = new THREE.Fog(0x070b14, 120, 460);
+scene.background = new THREE.Color(0x0b1220);
+/* Sis SADECE uzağı yumuşatmak için var; ön planı süte çevirmemeli.
+   `near` (220 m) oyuncunun tepki verdiği bölgeyi tamamen berrak bırakır:
+   yaklaşan trafik 340 m'lik çizim ufkunda bile yalnızca ~%20 soluktur.
+   `far` (820 m) binaların 780 m'deki çizim ufkunun hemen ötesinde kapanır,
+   yani uzak siluetler pop yapmadan sisin içinden çıkar. Renk asfalt ile
+   gece göğünün karışımı — nesneler beyaza patlamak yerine arka plana
+   gömülür. Ortam değişince atmosphere.js bu değerleri devralır ama
+   FOG_READABILITY tabanının altına inemez. */
+scene.fog = new THREE.Fog(0x0b1220, FOG_READABILITY.minNear, FOG_READABILITY.minFar);
 
 const camera = new THREE.PerspectiveCamera(VIEW.fovBase, innerWidth / innerHeight, 0.4, 1400);
 camera.position.set(0, VIEW.camHeight, -VIEW.camBack);

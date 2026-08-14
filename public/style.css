@@ -47,31 +47,36 @@ html, body {
   mix-blend-mode: multiply;
 }
 
-/* Speed streaks: opacity driven from JS via --speed-lines. */
+/* Speed streaks: opacity driven from JS via --speed-lines, which fx.js
+   already caps (OVERLAY_CAP.lines). Peripheral only — there is no full-screen
+   colour wash here, so the road and the cars ahead never pick up a tint. */
 #speedlines {
   position: fixed; inset: 0; pointer-events: none; z-index: 2;
   opacity: var(--speed-lines, 0);
   background:
-    repeating-linear-gradient(90deg, transparent 0 38px, rgba(180, 235, 255, 0.10) 38px 39px),
-    radial-gradient(60% 60% at 50% 50%, transparent 40%, rgba(120, 210, 255, 0.10) 100%);
-  -webkit-mask-image: radial-gradient(58% 58% at 50% 50%, transparent 55%, #000 100%);
-          mask-image: radial-gradient(58% 58% at 50% 50%, transparent 55%, #000 100%);
+    repeating-linear-gradient(90deg, transparent 0 38px, rgba(196, 226, 240, 0.07) 38px 39px);
+  -webkit-mask-image: radial-gradient(72% 72% at 50% 50%, transparent 62%, #000 100%);
+          mask-image: radial-gradient(72% 72% at 50% 50%, transparent 62%, #000 100%);
 }
 
 /* Warp layer: radial streaks that only appear on nitro / redline.
-   `--warp` is written every frame from fx.js, so no CSS transition here —
-   a transition would fight the per-frame updates and smear the response. */
+   `--warp` is written every frame from fx.js (capped at OVERLAY_CAP.warp), so
+   no CSS transition here — a transition would fight the per-frame updates and
+   smear the response. The mask keeps the middle of the screen — where traffic
+   and the rival are read — completely clear; streaks live at the edges. */
 #speedlines::after {
   content: ''; position: absolute; inset: -20%;
   opacity: var(--warp, 0);
   background:
     repeating-conic-gradient(from 0deg at 50% 50%,
-      rgba(210, 245, 255, 0) 0deg 1.1deg,
-      rgba(210, 245, 255, 0.30) 1.1deg 1.35deg,
-      rgba(210, 245, 255, 0) 1.35deg 2.6deg);
-  -webkit-mask-image: radial-gradient(42% 42% at 50% 50%, transparent 30%, #000 92%);
-          mask-image: radial-gradient(42% 42% at 50% 50%, transparent 30%, #000 92%);
-  transform: scale(calc(1 + var(--warp, 0) * 0.14));
+      rgba(214, 232, 245, 0) 0deg 1.1deg,
+      rgba(214, 232, 245, 0.16) 1.1deg 1.35deg,
+      rgba(214, 232, 245, 0) 1.35deg 2.6deg);
+  -webkit-mask-image: radial-gradient(58% 58% at 50% 50%, transparent 46%, #000 96%);
+          mask-image: radial-gradient(58% 58% at 50% 50%, transparent 46%, #000 96%);
+  /* --warp now tops out at 0.2, so the multiplier is scaled up to keep the
+     same gentle outward drift without touching the opacity budget. */
+  transform: scale(calc(1 + var(--warp, 0) * 0.35));
   filter: blur(0.4px);
 }
 

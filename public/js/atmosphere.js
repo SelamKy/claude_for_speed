@@ -19,11 +19,23 @@ import * as THREE from 'three';
 
 /* ============================== ön ayarlar ============================ */
 
+/**
+ * Sis okunabilirlik tabanı.
+ *
+ * Hava durumu ne olursa olsun sis, oyuncunun tepki verdiği bölgeyi (yaklaşan
+ * trafik, rakip, şerit çizgileri) kapatmamalı. `minNear` sisin en erken
+ * başlayabileceği mesafe, `minFar` tam kapanmanın en erken olabileceği
+ * mesafedir; `_apply()` her karede bu tabanı zorlar. Ön ayarlar daha AÇIK
+ * (daha uzak) değerler verebilir — taban yalnızca aşağıdan sınırlar, yani
+ * "yağmurda görüş düşsün" isteği bile ekranı süte çeviremez.
+ */
+export const FOG_READABILITY = { minNear: 220, minFar: 820 };
+
 /** @typedef {keyof typeof PRESETS} EnvId */
 export const PRESETS = {
   day: {
     name: 'Gündüz',
-    fog: 0xb9d3ef, fogNear: 240, fogFar: 1150,
+    fog: 0xa9c6e6, fogNear: 250, fogFar: 900,
     skyTop: 0x2f7fd4, skyBottom: 0xd6e8fb,
     hemiSky: 0xd8ecff, hemiGround: 0x8a94a3, hemiIntensity: 1.55,
     keyColor: 0xfff6e2, keyIntensity: 2.5, keyPos: [-70, 130, 70],
@@ -36,7 +48,7 @@ export const PRESETS = {
   },
   sunset: {
     name: 'Gün Batımı',
-    fog: 0xf0975a, fogNear: 150, fogFar: 780,
+    fog: 0xb9714a, fogNear: 235, fogFar: 860,
     skyTop: 0x1d3a6b, skyBottom: 0xff9d4d,
     hemiSky: 0xffc79a, hemiGround: 0x3a2b33, hemiIntensity: 1.0,
     keyColor: 0xffb066, keyIntensity: 2.2, keyPos: [-140, 26, -60],
@@ -49,7 +61,7 @@ export const PRESETS = {
   },
   night: {
     name: 'Gece',
-    fog: 0x070b14, fogNear: 90, fogFar: 470,
+    fog: 0x0b1220, fogNear: 225, fogFar: 840,
     skyTop: 0x02040a, skyBottom: 0x101c33,
     hemiSky: 0x6f9fd8, hemiGround: 0x080b12, hemiIntensity: 0.42,
     keyColor: 0x9fb8e8, keyIntensity: 0.30, keyPos: [-40, 90, 40],
@@ -62,7 +74,7 @@ export const PRESETS = {
   },
   rain: {
     name: 'Yağmur',
-    fog: 0x151d28, fogNear: 60, fogFar: 330,
+    fog: 0x1a232f, fogNear: 220, fogFar: 820,
     skyTop: 0x0b1119, skyBottom: 0x2b3644,
     hemiSky: 0x8ea6c0, hemiGround: 0x0d1219, hemiIntensity: 0.68,
     keyColor: 0xa9bdd6, keyIntensity: 0.45, keyPos: [-30, 100, 20],
@@ -431,10 +443,16 @@ export class Atmosphere {
   _apply() {
     const c = this._cur;
 
-    if (!this.scene.fog) this.scene.fog = new THREE.Fog(c.fog.getHex(), c.fogNear, c.fogFar);
+    // Okunabilirlik tabanı: ön ayarlar (ve aralarındaki geçişler) sisi
+    // FOG_READABILITY'nin altına indiremez. `far`, `near`'dan en az 400 m
+    // ötede tutulur; aksi halde dar bir bantta sis duvar gibi kapanırdı.
+    const fogNear = Math.max(FOG_READABILITY.minNear, c.fogNear);
+    const fogFar = Math.max(FOG_READABILITY.minFar, c.fogFar, fogNear + 400);
+
+    if (!this.scene.fog) this.scene.fog = new THREE.Fog(c.fog.getHex(), fogNear, fogFar);
     this.scene.fog.color.copy(c.fog);
-    this.scene.fog.near = c.fogNear;
-    this.scene.fog.far = c.fogFar;
+    this.scene.fog.near = fogNear;
+    this.scene.fog.far = fogFar;
     if (this.scene.background && this.scene.background.isColor) {
       this.scene.background.copy(c.fog);
     }
