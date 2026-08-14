@@ -32,8 +32,15 @@ import {
 const DEBUG = new URLSearchParams(location.search).has('debug');
 
 const THREE_VERSION = '0.161.0';
-const DRACO_PATH = `https://unpkg.com/three@${THREE_VERSION}/examples/jsm/libs/draco/`;
-
+const DRACO_CDN = `https://unpkg.com/three@${THREE_VERSION}/examples/jsm/libs/draco/`;
+{
+  // Decoder CDN'ine TLS el sıkışması .glb indirmeleriyle aynı anda başlasın.
+  const pc = document.createElement('link');
+  pc.rel = 'preconnect';
+  pc.href = 'https://unpkg.com';
+  pc.crossOrigin = 'anonymous';
+  document.head.appendChild(pc);
+}
 /* Değerler gönderilen .glb dosyalarından ölçüldü. `faceYaw` her modeli
    burnu +Z'ye bakacak şekilde döndürür:
      BMW  — farlar z = -1.65, stoplar z = +1.94   -> 180° çevir
@@ -113,6 +120,24 @@ const TRAFFIC_MODELS = ['npc1', 'npc2', 'npc3'];
 
 /** Garajdaki gerçek (indirilen) araç modelleri. */
 const PLAYER_MODELS = ['player', 'skyline'];
+
+/** İlk karede GÖRÜNEN modeller: seçili araç + varsayılan rakip (bmw). */
+const ESSENTIAL_KEYS = [...new Set(
+  ['player', VEHICLE_BY_ID[garage.selected]?.model].filter((k) => k && MODELS[k])
+)];
+{
+  // Bu iki .glb'nin fetch'ini three.js/DRACO hazır olmadan başlat.
+  // crossOrigin BİLEREK atanmadı: GLTFLoader'ın XHR'ıyla aynı CORS modu,
+  // aksi halde tarayıcı dosyayı iki kez indirir.
+  for (const k of ESSENTIAL_KEYS) {
+    const l = document.createElement('link');
+    l.rel = 'preload';
+    l.as = 'fetch';
+    l.href = MODELS[k].url;
+    l.fetchPriority = 'high';
+    document.head.appendChild(l);
+  }
+}
 
 /** Bir aracın alçak poligonlu vekiline geçtiği mesafe (m). */
 const LOD_SWAP = 70;
@@ -573,11 +598,19 @@ function updateRoad(distance) {
 
 /* ============================ model hattı ============================== */
 
+THREE.Cache.enabled = true; // aynı url ikinci kez ağdan inmesin
+
 const loader = new GLTFLoader();
 {
   // .glb dosyaları Draco ile sıkıştırıldı (157 MB -> ~11 MB).
+  // DRACO_PATH tanımsızdı (kırık referans, tüm önyüklemeyi düşürüyordu) —
+  // three.js zaten unpkg'den geliyor, decoder de aynı CDN'den paralel iner.
   const draco = new DRACOLoader();
-  draco.setDecoderPath(DRACO_PATH);
+  draco.setDecoderPath(DRACO_CDN);
+  draco.setDecoderConfig({ type: 'wasm' }); // JS fallback'i denemeden doğrudan wasm
+  // Çözme işi worker'lara dağılır: ana iş parçacığı (ve yükleme çubuğu) donmaz.
+  draco.setWorkerLimit(Math.min(4, navigator.hardwareConcurrency || 2));
+  draco.preload();                          // wasm, .glb'lerle aynı anda iner
   loader.setDRACOLoader(draco);
 }
 
@@ -585,13 +618,29 @@ const LOAD_KEYS = [...PLAYER_MODELS, ...TRAFFIC_MODELS];
 const ALL_LOADS = { ...MODELS, scenery: SCENERY_MODEL };
 const progress = Object.fromEntries([...LOAD_KEYS, 'scenery'].map((k) => [k, 0]));
 const prefabs = {};
+/** Çubuğun %100'ü = SADECE açılışı bloklayan varlıklar; boot() daraltır. */
+let barKeys = [...LOAD_KEYS, 'scenery'];
+/** Yarışın gerçekten beklediği tek şey: trafik + ertelenmiş rakip modeli. */
+let trafficReady = null;
+/** Geriye dönük ad — trafik hattına işaret eder. */
+let assetsReady = null;
 
-function setLoadProgress() {
-  const pct = Math.round(
-    Object.keys(progress).reduce((sum, k) => sum + progress[k] * ALL_LOADS[k].weight, 0) * 100
-  );
-  el.loadBar.style.width = `${Math.min(100, pct)}%`;
+let barQueued = false;
+function paintLoadBar() {
+  barQueued = false;
+  const total = barKeys.reduce((s, k) => s + ALL_LOADS[k].weight, 0) || 1;
+  const pct = Math.min(100, Math.round(
+    barKeys.reduce((s, k) => s + progress[k] * ALL_LOADS[k].weight, 0) / total * 100
+  ));
+  el.loadBar.style.width = `${pct}%`;
   el.loadLabel.textContent = pct < 100 ? `Araçlar yükleniyor… %${pct}` : 'Otoyol hazırlanıyor…';
+}
+
+/** onProgress saniyede yüzlerce kez tetiklenir — kareye yalnız bir kez boya. */
+function setLoadProgress() {
+  if (barQueued) return;
+  barQueued = true;
+  requestAnimationFrame(paintLoadBar);
 }
 
 function loadGLTF(cfg) {
@@ -2474,13 +2523,18 @@ socket.on('room:playerLeft', (p) => {
   if (rivalCar) rivalCar.visible = false;
 });
 
-socket.on('match:countdown', (data) => {
+socket.on('match:countdown', async (data) => {
   CONFIG = { ...CONFIG, ...data.config };
   G.seed = data.seed;
   G.startAt = data.startAt;
   // Bu paketle gelen zaman çiftini taze bir saat düzeltmesi olarak kabul et.
   net.offset = data.serverTime - Date.now();
   net.synced = true;
+
+  // Trafik arka planda henüz bitmediyse (ör. çok hızlı eşleşme), yarış her
+  // istemcide aynı araçlarla başlasın diye SADECE onu bekleriz. Manzara
+  // oynanışı etkilemez; hazır olduğunda sahneye kendi girer.
+  if (trafficReady) await trafficReady;
 
   buildRoad();
   bindWorldSystems();
@@ -2673,23 +2727,64 @@ function bindWorldSystems() {
   }
 }
 
+/**
+ * Trafik modelleri, seçilmemiş oyuncu aracı ve manzara — lobiye hiçbir
+ * oyunun bunlara ihtiyacı olmadan girilebilir. Arka planda paralel iner;
+ * bitince araçları (varsa) geriye doldurur ve manzarayı bağlar.
+ */
+function loadDeferredAssets(keys) {
+  // Manzara kimseyi bloklamaz: indiği anda kendi kendine sahneye girer.
+  loadScenery().then((sceneryPrefabs) => {
+    scenery = new SceneryField(sceneryPrefabs, world);
+    bindWorldSystems();
+  });
+
+  // Trafik + ertelenmiş araçlar: hepsi aynı anda iner, her biri kendi
+  // indirmesi biter bitmez prefab'a dönüşür (ağ ile CPU örtüşür).
+  trafficReady = Promise.all(keys.map(async (k) => {
+    const gltf = await loadGLTF(MODELS[k]);
+    prefabs[k] = buildPrefab(gltf, MODELS[k], { dropInterior: true });
+    progress[k] = 1;
+    setLoadProgress();
+  })).then(() => {
+    // Trafik çarpışma kutuları modelin gerçek ölçüsünden türetilir; iki istemci
+    // de aynı modelden aynı sayıyı hesaplar, yani çarpışmalar da senkron kalır.
+    for (const name of TRAFFIC_MODELS) {
+      if (!prefabs[name]) continue;
+      const u = prefabs[name].userData;
+      trafficHit.set(name, {
+        halfWidth: Math.min(u.width * 0.5 * 0.80, 1.0),
+        halfLength: u.length * 0.5 * 0.92,
+      });
+    }
+    // Rakip/oyuncu ertelenmiş bir model bekliyorduysa şimdi tamamla.
+    if (currentLoadoutKey() !== builtLoadout) rebuildCars();
+  });
+
+  assetsReady = trafficReady;
+  return trafficReady;
+}
+
 async function boot() {
   buildRoad();
 
-  const gltfs = {};
-  const [, sceneryPrefabs] = await Promise.all([
-    Promise.all(LOAD_KEYS.map(async (k) => { gltfs[k] = await loadGLTF(MODELS[k]); })),
-    loadScenery(),
-  ]);
-  for (const k of LOAD_KEYS) progress[k] = 1;
+  // Sadece ilk karede görünecek modeller senkron: seçili oyuncu aracı ve
+  // varsayılan rakip (bmw -> 'player'). Trafik ve manzara arka planda iner.
+  // ESSENTIAL_KEYS modül başında hesaplandı — <link rel=preload> ile aynı liste.
+  const essentialKeys = ESSENTIAL_KEYS;
+  const deferredKeys = LOAD_KEYS.filter((k) => !essentialKeys.includes(k));
+
+  // Çubuk yalnız bu iki dosyayı ölçer, böylece gerçekten %100'e ulaşır ve
+  // lobiye geçiş anında olur (eskiden %37'de kesilip atlıyordu).
+  barKeys = essentialKeys;
   setLoadProgress();
 
-  // Ağır birleştirme adımından önce yükleme çubuğunun boyanmasına izin ver.
-  await new Promise((r) => setTimeout(r, 30));
-
-  for (const k of LOAD_KEYS) {
-    prefabs[k] = buildPrefab(gltfs[k], MODELS[k], { dropInterior: true });
-  }
+  await Promise.all(essentialKeys.map(async (k) => {
+    const gltf = await loadGLTF(MODELS[k]);
+    prefabs[k] = buildPrefab(gltf, MODELS[k], { dropInterior: true });
+    progress[k] = 1;
+    setLoadProgress();
+  }));
 
   // Prosedürel araçlar: indirilecek dosyası olmayan başlangıç araçları.
   for (const v of Object.values(VEHICLE_BY_ID)) {
@@ -2697,19 +2792,12 @@ async function boot() {
     prefabs[v.id] = buildProceduralPrefab(v.proc, { measureLift });
   }
 
-  // Trafik çarpışma kutuları modelin gerçek ölçüsünden türetilir; iki istemci
-  // de aynı modelden aynı sayıyı hesaplar, yani çarpışmalar da senkron kalır.
-  for (const name of TRAFFIC_MODELS) {
-    const u = prefabs[name].userData;
-    trafficHit.set(name, {
-      halfWidth: Math.min(u.width * 0.5 * 0.80, 1.0),
-      halfLength: u.length * 0.5 * 0.92,
-    });
-  }
+  // Trafik + manzara + ertelenmiş araç modelini arka planda başlat; lobiyi
+  // bunların bitmesini beklemeden gösteriyoruz.
+  assetsReady = loadDeferredAssets(deferredKeys);
 
   /* --- alt sistemler --------------------------------------------------- */
   atmosphere = new Atmosphere({ scene, renderer, camera, hemi, key, rim });
-  scenery = new SceneryField(sceneryPrefabs, world);
   fx = new Fx(world, el.speedlines);
 
   rebuildCars();
@@ -2718,6 +2806,18 @@ async function boot() {
   bindWorldSystems();
   applyEnvironment(true);
 
+  applyLoadout();
+  refreshLobbyLoadout();
+  resetRace();
+  frame();
+
+  // Çekirdek varlıklar hazır: çubuğu rAF beklemeden %100'e yaz ve geç.
+  paintLoadBar();
+  show(el.loading, false);
+  show(el.lobby, true);
+
+  // Garaj ekranı ilk karede görünmez; kurulumu lobiyi bekletmesin.
+  // (openGarage() zaten hazır değilse kibarca uyarıyor.)
   garageScreen = new GarageScreen({
     renderer,
     // Garaj önizlemesi pistteki araçla AYNI kurulum hattını kullanır —
@@ -2730,14 +2830,6 @@ async function boot() {
       if (currentLoadoutKey() !== builtLoadout) rebuildCars();
     },
   });
-
-  applyLoadout();
-  refreshLobbyLoadout();
-  resetRace();
-  frame();
-
-  show(el.loading, false);
-  show(el.lobby, true);
 
   // Davet bağlantıları doğrudan odaya düşer.
   const code = new URLSearchParams(location.search).get('room');
