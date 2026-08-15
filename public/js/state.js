@@ -17,6 +17,7 @@
 
 export const G = {
   phase: 'boot',            // boot | lobby | room | countdown | racing | over
+  solo: false,              // true = Tek Oyunculu koşu (sunucusuz, odasız)
   ready: false,
   youId: null,
   roomCode: null,
@@ -29,7 +30,7 @@ export const G = {
     distance: 0, speed: 0, x: 0, lane: 1, targetLane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
-    nitro: 1, boosting: false,
+    nitro: 1, boosting: false, topSpeed: 0,
   },
   rival: {
     id: null, buffer: [], distance: 0, x: 0, speed: 0, lateral: 0,

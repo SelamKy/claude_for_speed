@@ -169,6 +169,23 @@ html, body {
 .lobby-head { margin-bottom: 26px; }
 .lobby-stage { display: flex; flex-direction: column; gap: 14px; }
 
+/* --- mod seçimi (ana menü) --- */
+.mode-grid { display: grid; gap: 12px; }
+.btn-mode {
+  flex-direction: column; align-items: stretch; justify-content: center;
+  gap: 6px; padding: 18px 22px; text-align: left;
+}
+.mode-title {
+  display: flex; align-items: center; gap: 9px;
+  font-size: 17px; font-weight: 800; letter-spacing: 0.12em;
+}
+.mode-sub {
+  font-size: 11.5px; font-weight: 600; letter-spacing: 0.05em;
+  text-transform: none; color: var(--muted);
+}
+.btn-mode:hover:not(:disabled) .mode-sub { color: var(--text); }
+.btn-mode:disabled .mode-sub::after { content: ' · yükleniyor…'; }
+
 .divider {
   display: flex; align-items: center; gap: 12px;
   color: var(--muted); font-size: 11px; letter-spacing: 0.2em; text-transform: uppercase;
@@ -352,6 +369,11 @@ kbd {
 .gap.ahead  { color: var(--good); }
 .gap.behind { color: var(--rival); }
 
+/* Tek Oyunculu: rakip yok — rakip pipi, fark satırı ve ping ölçüsü de yok. */
+#hud.solo .pip.rival,
+#hud.solo .gap,
+#hud.solo .net-row:first-child { display: none; }
+
 .net-card { display: flex; flex-direction: column; justify-content: center; gap: 4px; min-width: 186px; }
 .net-row { display: flex; align-items: baseline; gap: 8px; font-family: var(--mono); font-size: 13px; }
 /* Türkçe etiketler İngilizce kısaltmalardan uzun — sabit genişlik yerine esnek. */
@@ -435,6 +457,9 @@ kbd {
 .result-list .rk { font-family: var(--mono); color: var(--muted); width: 22px; }
 .result-list .nm { flex: 1; font-weight: 700; letter-spacing: 0.06em; }
 .result-list .st { font-family: var(--mono); font-size: 13px; color: var(--muted); }
+/* Tek Oyunculu özet satırları: etiket solda, ölçüm sağda ve okunur. */
+.result-list li.is-stat .rk { color: var(--warn); }
+.result-list li.is-stat .st { font-size: 15px; font-weight: 800; color: var(--text); }
 .result-actions { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
 
 /* ------------------------------- toasts ------------------------------- */

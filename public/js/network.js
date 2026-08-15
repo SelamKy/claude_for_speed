@@ -16,7 +16,7 @@ import * as THREE from 'three';
 import {
   mergeConfig, NET, DRIVE, BODY, TRAFFIC_MODELS,
 } from './config.js';
-import { el, show, toast, feed, restartAnim } from './dom.js';
+import { el, show, toast, feed, restartAnim, lobbyStage } from './dom.js';
 import { G } from './state.js';
 import { buildRoad, bindWorldSystems, applyEnvironment } from './scene.js';
 import { trafficReady, poseBody, driveWheels } from './loader.js';
@@ -62,6 +62,7 @@ setInterval(syncClock, NET.syncIntervalMs);
 /* ============================ durum gönderimi ========================== */
 
 export function sendState(now) {
+  if (G.solo) return;                 // tek oyunculu koşu ağa hiç dokunmaz
   if (G.phase !== 'racing' || G.me.crashed || G.me.finished) return;
   if (now - G.lastStateSent < 1000 / NET.stateHz) return;
   G.lastStateSent = now;
@@ -214,8 +215,7 @@ export function sendLoadout() {
 export function enterRoomView() {
   G.phase = 'room';
   show(el.lobby, true);
-  show(el.lobbyEntry, false);
-  show(el.lobbyRoom, true);
+  lobbyStage('room');
   show(el.hud, false);
   show(el.gameover, false);
 }
@@ -224,8 +224,7 @@ export function joinRoom(code) {
   socket.emit('room:join', { room: code || undefined }, (res) => {
     if (!res || !res.ok) {
       toast(res ? res.message : 'Sunucuya ulaşılamadı.', 'err');
-      show(el.lobbyEntry, true);
-      show(el.lobbyRoom, false);
+      lobbyStage('entry');
       history.replaceState(null, '', '/');
       return;
     }
@@ -276,14 +275,14 @@ el.btnLeave.addEventListener('click', () => {
   socket.emit('room:leave', {}, () => {
     G.roomCode = null; G.youId = null; G.phase = 'lobby';
     history.replaceState(null, '', '/');
-    show(el.lobbyRoom, false);
-    show(el.lobbyEntry, true);
+    lobbyStage('mode');
     show(el.gameover, false);
     show(el.hud, false);
   });
 });
 
 el.btnRematch.addEventListener('click', () => {
+  if (G.solo) return;                 // tek oyunculu tekrar: solo.js
   socket.emit('room:rematch', {}, (res) => {
     if (res && res.ok === false) { toast(res.message, 'err'); return; }
     el.btnRematch.disabled = true;
@@ -292,6 +291,7 @@ el.btnRematch.addEventListener('click', () => {
 });
 
 el.btnQuit.addEventListener('click', () => {
+  if (G.solo) return;                 // tek oyunculu çıkış: solo.js
   show(el.gameover, false);
   show(el.hud, false);
   enterRoomView();
@@ -302,17 +302,20 @@ el.btnQuit.addEventListener('click', () => {
 socket.on('connect', () => {
   syncClock();
   if (G.phase === 'boot') return;   // modeller hâlâ yükleniyor, katılım sonra
-  if (!G.roomCode) show(el.lobbyEntry, true);
+  if (G.solo) return;               // tek oyunculu koşuyu bölme
+  // Oda yokken oda görünümünde kalınmaz; ana menü ya da giriş açık kalır.
+  if (!G.roomCode && lobbyStage() === 'room') lobbyStage('mode');
 });
 
 socket.on('disconnect', () => {
+  // Tek Oyunculu koşu sunucudan bağımsız çalışır: bağlantı düşse de sürer.
+  if (G.solo) return;
   toast('Sunucu bağlantısı kesildi.', 'err');
   G.phase = 'lobby';
   show(el.hud, false);
   show(el.countdown, false);
   show(el.lobby, true);
-  show(el.lobbyRoom, false);
-  show(el.lobbyEntry, true);
+  lobbyStage('mode');
 });
 
 socket.on('room:update', (room) => {
@@ -332,6 +335,9 @@ socket.on('room:playerLeft', (p) => {
 });
 
 socket.on('match:countdown', async (data) => {
+  // Çok oyunculu maç her zaman "solo değil" durumundan başlar.
+  G.solo = false;
+  el.hud.classList.remove('solo');
   mergeConfig(data.config);
   G.seed = data.seed;
   G.startAt = data.startAt;

@@ -15,7 +15,9 @@ export { $ };
 
 export const el = {
   loading: $('loading'), loadBar: $('load-bar'), loadLabel: $('load-label'),
-  lobby: $('lobby'), lobbyEntry: $('lobby-entry'), lobbyRoom: $('lobby-room'),
+  lobby: $('lobby'), lobbyMode: $('lobby-mode'),
+  lobbyEntry: $('lobby-entry'), lobbyRoom: $('lobby-room'),
+  btnSolo: $('btn-solo'), btnMulti: $('btn-multi'), btnBackMode: $('btn-back-mode'),
   btnCreate: $('btn-create'), joinForm: $('join-form'), joinCode: $('join-code'),
   roomCode: $('room-code'), inviteLink: $('invite-link'), btnCopy: $('btn-copy'),
   copyText: $('copy-text'), playerList: $('player-list'), btnReady: $('btn-ready'),
@@ -38,6 +40,24 @@ export const el = {
 };
 
 export const show = (node, on) => node.classList.toggle('hidden', !on);
+
+/* ------------------------------ lobi sahneleri -------------------------
+   Lobi panelinin üç sahnesi var ve HER ZAMAN yalnız biri açıktır:
+     mode  — ana menü (Tek Oyunculu / Çok Oyunculu)
+     entry — çok oyunculu giriş (oda kur / odaya katıl)
+     room  — oda görünümü (davet + hazır)
+   Argümansız çağrı o an açık olan sahnenin adını döndürür.               */
+let _stage = 'mode';
+
+export function lobbyStage(which) {
+  if (which) {
+    _stage = which;
+    show(el.lobbyMode, which === 'mode');
+    show(el.lobbyEntry, which === 'entry');
+    show(el.lobbyRoom, which === 'room');
+  }
+  return _stage;
+}
 
 export function toast(msg, kind = '') {
   const node = document.createElement('div');

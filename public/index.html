@@ -4,7 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
 <meta name="theme-color" content="#05070d" />
-<title>Claude for Speed — 2 Kişilik Otoyol Yarışı</title>
+<title>Claude for Speed — Tek &amp; Çok Oyunculu Otoyol Yarışı</title>
 <link rel="icon" type="image/png" href="/favicon.png" />
 <link rel="preconnect" href="https://unpkg.com" />
 <link rel="stylesheet" href="/style.css" />
@@ -40,8 +40,29 @@
         <p class="tagline">İki araba. Dört şerit. Tek hayatta kalan.</p>
       </header>
 
-      <!-- --- giriş: oda kur veya katıl --- -->
-      <div id="lobby-entry" class="lobby-stage">
+      <!-- --- ana menü: mod seçimi --- -->
+      <div id="lobby-mode" class="lobby-stage">
+        <div class="mode-grid">
+          <button id="btn-solo" class="btn btn-mode btn-primary">
+            <span class="mode-title"><span class="btn-glyph">▶</span> Tek Oyunculu</span>
+            <span class="mode-sub">Trafiğe karşı 6000 m — beklemeden başla</span>
+          </button>
+
+          <button id="btn-multi" class="btn btn-mode">
+            <span class="mode-title"><span class="btn-glyph">⚑</span> Çok Oyunculu</span>
+            <span class="mode-sub">Oda kur ya da bir arkadaşının odasına katıl</span>
+          </button>
+        </div>
+
+        <button id="btn-garage" class="btn btn-ghost btn-garage">
+          <span class="btn-glyph">◈</span> Garaj &amp; Dükkân
+          <em id="lobby-coins" class="wallet-mini">0</em>
+        </button>
+        <p id="lobby-loadout" class="muted status"></p>
+      </div>
+
+      <!-- --- çok oyunculu giriş: oda kur veya katıl --- -->
+      <div id="lobby-entry" class="lobby-stage hidden">
         <button id="btn-create" class="btn btn-primary btn-lg">
           <span class="btn-glyph">▶</span> Oda Kur
         </button>
@@ -54,11 +75,7 @@
           <button id="btn-join" type="submit" class="btn">Odaya Katıl</button>
         </form>
 
-        <button id="btn-garage" class="btn btn-ghost btn-garage">
-          <span class="btn-glyph">◈</span> Garaj &amp; Dükkân
-          <em id="lobby-coins" class="wallet-mini">0</em>
-        </button>
-        <p id="lobby-loadout" class="muted status"></p>
+        <button id="btn-back-mode" class="btn btn-link">‹ Mod seçimine dön</button>
       </div>
 
       <!-- --- oda: davet + hazır --- -->

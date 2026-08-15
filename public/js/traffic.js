@@ -127,7 +127,8 @@ export function checkCollisions(raceTime) {
 export function crash(trafficId) {
   const me = G.me;
   me.crashed = true;
-  socket.emit('player:crash', { trafficId });
+  // Tek Oyunculu koşuda oda yok: kazayı sunucuya bildirmenin karşılığı yok.
+  if (!G.solo) socket.emit('player:crash', { trafficId });
   el.flash.classList.remove('hit');
   void el.flash.offsetWidth;
   el.flash.classList.add('hit');

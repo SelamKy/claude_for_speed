@@ -111,6 +111,13 @@ try {
   out.garageClosed = await A.evaluate(() => !document.getElementById('lobby').classList.contains('hidden'));
 
   /* --- 2. oda kur / katıl ---------------------------------------------- */
+  // Ana menü artık mod seçimiyle açılıyor: önce "Çok Oyunculu" sahnesine geç.
+  await click(A, '#btn-multi');
+  await click(B, '#btn-multi');
+  await A.waitForFunction(
+    () => !document.getElementById('lobby-entry').classList.contains('hidden'),
+    null, { timeout: 15000 });
+
   await click(A, '#btn-create');
   await A.waitForFunction(() => /^[A-Z0-9]{6}$/.test(document.getElementById('room-code').textContent || ''), null, { timeout: 20000 });
   const code = await A.evaluate(() => document.getElementById('room-code').textContent);

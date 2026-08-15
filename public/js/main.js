@@ -45,7 +45,7 @@ import { garage, VEHICLE_BY_ID } from './garage.js';
 import {
   DEBUG, CONFIG, MODELS, SCENERY_MODEL, TRAFFIC_MODELS, ESSENTIAL_KEYS, DRIVE, NITRO,
 } from './config.js';
-import { el, show, toast } from './dom.js';
+import { el, show, toast, lobbyStage } from './dom.js';
 import { G, input } from './state.js';
 import {
   renderer, scene, camera, world, hemi, key, rim,
@@ -69,6 +69,7 @@ import {
 import {
   net, sendState, sendLoadout, joinRoom, tickRival, updateCountdown,
 } from './network.js';
+import { tickSolo } from './solo.js';
 
 /* ============================== çizim ================================== */
 
@@ -104,20 +105,23 @@ function frame() {
 
   if (G.phase === 'countdown') {
     updateCountdown();
-    // Emniyet kemeri: match:start gecikir ya da düşerse saate göre başla.
-    if (net.now() - G.startAt > 300) startRacing();
+    // Tek oyunculuda `match:start` yok: ışık yeşile döner dönmez başla.
+    // Çok oyunculuda emniyet kemeri: paket gecikir ya da düşerse saate göre başla.
+    if (G.solo ? net.now() >= G.startAt : net.now() - G.startAt > 300) startRacing();
   }
 
   if (G.phase === 'racing' || G.phase === 'over') {
     G.raceTime = net.now() - G.startAt;
+    // Tek oyunculuda sunucunun `tickRoom()` rolünü solo.js üstlenir:
+    // trafiği üretir, bitişi/kazayı yakalar.
+    if (G.solo) tickSolo(G.raceTime);
     holdSteer(now);
     tickPlayer(dt);
     tickTraffic(G.raceTime, dt);
     checkCollisions(G.raceTime);
     checkNearMiss(G.raceTime, now);
     tickPickups(dt);
-    tickRival(dt);
-    sendState(now);
+    if (!G.solo) { tickRival(dt); sendState(now); }
     updateHUD();
   }
 
@@ -321,8 +325,7 @@ async function boot() {
   const code = new URLSearchParams(location.search).get('room');
   G.phase = 'lobby';
   if (code && /^[A-Z0-9]{6}$/i.test(code)) {
-    show(el.lobbyEntry, false);
-    show(el.lobbyRoom, true);
+    lobbyStage('room');
     el.lobbyStatus.textContent = 'Odaya katılınıyor…';
     joinRoom(code.toUpperCase());
   }

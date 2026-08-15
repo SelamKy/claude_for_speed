@@ -113,6 +113,35 @@ export const WHEEL_SHAPE = {
   noiseFraction: 0.02,
 };
 
+/** Eksen adı -> bileşen indeksi. */
+const AXIS = { x: 0, y: 1, z: 2 };
+const _v = new THREE.Vector3();
+
+/**
+ * Çok malzemeli bir geometriden tek bir `group`u indekssiz olarak keser.
+ *
+ * (Eskiden `buildPrefab()` içinde kapalıydı; ada göre tekerlek ayıklama da
+ * aynı kesiciye ihtiyaç duyduğu için modül düzeyine alındı. Hiçbir kapanış
+ * değişkenine dokunmuyordu, davranış birebir aynı.)
+ */
+function sliceGeometry(geo, start, count) {
+  if (geo.index) {
+    const cut = geo.clone();
+    cut.clearGroups();
+    cut.setIndex(new THREE.BufferAttribute(geo.index.array.slice(start, start + count), 1));
+    const flat = cut.toNonIndexed();
+    cut.dispose();
+    return flat;
+  }
+  const out = new THREE.BufferGeometry();
+  for (const name of ['position', 'normal', 'uv']) {
+    const a = geo.getAttribute(name);
+    const n = a.itemSize;
+    out.setAttribute(name, new THREE.BufferAttribute(a.array.slice(start * n, (start + count) * n), n));
+  }
+  return out;
+}
+
 /**
  * Bir meshi dünya matrisi pişirilmiş, birleştirilebilir bir geometriye çevirir.
  * Sadece birleştirebildiğimiz öznitelikleri (position/normal/uv) taşır.
@@ -320,12 +349,350 @@ export function extractWheels(parts, shell, lateralAxis, lengthAxis, shape = WHE
       radius: Math.max(qSize.y, qSize[lengthAxis]) / 2,
       bottom: box.min.y,
       lon: pivotAt[lengthAxis],
+      lat: pivotAt[lateralAxis],
     };
     wheels.push(pivot);
   }
 
   // Hiçbir parçası tekerlek olarak kalmayan mesh gövdeye geri döner.
   return { wheels, used: keptParts };
+}
+
+/* --- ada göre tekerlek tespiti + pivot düzeltme (modele özel) ---------- */
+
+/*
+ * Yukarıdaki geometrik sezgi ADSIZ modeller için yazıldı ve BMW gibi bütün
+ * malzemesi "..._WHEEL..." adını taşıyan dosyalarda tek doğru yol o. Ama
+ * düğümleri düzgün adlandırılmış bir modelde (ilkaraba) sezgi gereksiz risk
+ * taşıyor: aracı dört çeyreğe bölmek, tekerleği KENDİ sınırından değil
+ * ARACIN orta hattından ayırmak demek. `ilkaraba.glb`de bu iki yerde
+ * ısırıyordu —
+ *
+ *   • `rear wheels` düğümü İKİ tekeri tek mesh'te taşıyor. Meshin kendi
+ *     kutusunun merkezi aracın orta hattına düşer; oraya konan bir pivot
+ *     tekerin tamamen dışındadır, teker kendi aksında değil aracın altında
+ *     yörüngede döner. (Şikâyet edilen "dış eksende dönme" tam olarak bu.)
+ *   • Gövdedeki `black floats` parçası yuvarlaklık eşiğinin %3 altında
+ *     (0.600 / 0.62) duruyor: model bir daha dışa aktarıldığında ön teker
+ *     kovasına düşüp pivotu kaydırabilirdi.
+ *
+ * Bu yol, `MODELS[].wheelNodes` tanımlı olan modellerde devreye girer ve
+ * tekerlekleri şöyle kurar:
+ *
+ *   1. Adı kurala uyan mesh bulunur (kendi adı, ata düğüm adı veya malzeme
+ *      adı) — ve KUTUSU da tekerleğe benzemek zorundadır, yani "steering
+ *      wheel" / "wheel arch" gibi adaylar burada elenir.
+ *   2. Mesh'in dünya matrisi geometriye pişirilir (özgün konum/dönüşü
+ *      koruyan tek yol: gövde de aynı şekilde pişiriliyor).
+ *   3. Tek mesh'te birden çok teker varsa mesh, İÇİNDE HİÇ ÜÇGEN OLMAYAN
+ *      boşluklardan bölünür — hiçbir üçgen ikiye kesilmediği için lastikte
+ *      delik açılmaz.
+ *   4. Her teker için geometri `center()` ile kendi geometrik merkezine
+ *      oturtulur ve merkeze konan temiz bir `THREE.Group` pivotunun ALTINA
+ *      alınır. Böylece dönüş ekseni aksın tam üstünden geçer.
+ *   5. Özgün mesh düğümü gövde birleştirmesinden düşürülür (`used`), yani
+ *      hiyerarşide yerini bu pivot grubu alır.
+ */
+
+/**
+ * Adı kurala uyuyor mu?
+ *
+ * GLTF dışa aktarımlarında geometriyi taşıyan düğüm çoğu zaman
+ * `<isim>_<malzeme>_0` diye türetilir ve ASIL ad ebeveynde durur
+ * (`front right wheel` -> `front right wheel_wheel_0`); bu yüzden ata
+ * zincirinin tamamına ve malzeme adlarına bakılır.
+ */
+function wheelNamed(part, re) {
+  for (let o = part.mesh; o; o = o.parent) if (o.name && re.test(o.name)) return true;
+  for (const m of part.mats) if (m && m.name && re.test(m.name)) return true;
+  return false;
+}
+
+/** Parçayı malzeme başına, indekssiz, dünya matrisi pişmiş geometrilere böler. */
+function bakePieces(part) {
+  const baked = bakeGeometry(part.mesh, part.matrix);
+  if (!baked) return [];
+  const g = part.mesh.geometry;
+  const out = [];
+
+  if (part.mats.length > 1 && g.groups.length) {
+    for (const grp of g.groups) {
+      const geo = sliceGeometry(baked, grp.start, grp.count);
+      if (geo) out.push({ geo, material: part.mats[grp.materialIndex] || part.mats[0] });
+    }
+    baked.dispose();
+  } else {
+    const flat = baked.index ? baked.toNonIndexed() : baked;
+    if (flat !== baked) baked.dispose();
+    out.push({ geo: flat, material: part.mats[0] });
+  }
+  return out;
+}
+
+/** Üçgen başına eksen aralıkları — bölme ve kutu hesabı bunun üstünde döner. */
+function triangleSpans(pieces) {
+  let n = 0;
+  for (const p of pieces) n += p.geo.getAttribute('position').count / 3;
+
+  const lo = new Float32Array(n * 3);
+  const hi = new Float32Array(n * 3);
+  const piece = new Uint32Array(n);
+  const vert = new Uint32Array(n);      // üçgenin ilk köşesinin köşe indeksi
+
+  let k = 0;
+  for (let pi = 0; pi < pieces.length; pi++) {
+    const pos = pieces[pi].geo.getAttribute('position');
+    const tris = pos.count / 3;
+    for (let t = 0; t < tris; t++) {
+      const i = t * 3;
+      for (let c = 0; c < 3; c++) {
+        let a = Infinity, b = -Infinity;
+        for (let v = 0; v < 3; v++) {
+          const val = pos.getComponent(i + v, c);
+          if (val < a) a = val;
+          if (val > b) b = val;
+        }
+        lo[k * 3 + c] = a;
+        hi[k * 3 + c] = b;
+      }
+      piece[k] = pi;
+      vert[k] = i;
+      k++;
+    }
+  }
+  return { n, lo, hi, piece, vert };
+}
+
+/**
+ * Eksen boyunca İÇİNDE HİÇBİR ÜÇGEN OLMAYAN boşlukları bulur ve ortalarından
+ * kesim noktaları döndürür.
+ *
+ * Süpürme, üçgenleri başlangıçlarına göre sıralayıp o ana kadar ulaşılan en
+ * uzak noktayı ("reach") takip eder: bir sonraki üçgen o noktadan `minGap`
+ * kadar ötede başlıyorsa arada gerçekten boşluk vardır. Boşluk kanıtlanmış
+ * olduğu için kesim hiçbir üçgeni ikiye ayırmaz.
+ */
+function emptySlabCuts(S, axis, minGap) {
+  const order = new Uint32Array(S.n);
+  for (let i = 0; i < S.n; i++) order[i] = i;
+  order.sort((a, b) => S.lo[a * 3 + axis] - S.lo[b * 3 + axis]);
+
+  const cuts = [];
+  let reach = -Infinity;
+  for (let j = 0; j < S.n; j++) {
+    const i = order[j];
+    const l = S.lo[i * 3 + axis];
+    if (reach > -Infinity && l - reach > minGap) cuts.push((reach + l) / 2);
+    const h = S.hi[i * 3 + axis];
+    if (h > reach) reach = h;
+  }
+  return cuts;
+}
+
+/** `v` hangi dilime düşer? (kesimler artan sırada gelir) */
+function cellOf(v, cuts) {
+  let i = 0;
+  while (i < cuts.length && v > cuts[i]) i++;
+  return i;
+}
+
+/**
+ * Tekerleğe benziyor mu? `extractWheels`teki ölçütlerin aynısı, ama burada
+ * ada göre seçilmiş bir adayı DOĞRULAMAK için kullanılıyor: yuvarlak, aks
+ * boyunca ince, araç boyuna göre makul çapta ve kaportanın alt yarısında.
+ */
+function wheelShaped(box, lat, lon, shape, minDia, maxDia, lowY) {
+  const sLat = box.max.getComponent(lat) - box.min.getComponent(lat);
+  const sY = box.max.y - box.min.y;
+  const sLon = box.max.getComponent(lon) - box.min.getComponent(lon);
+  const dia = Math.max(sY, sLon);
+  const round = Math.min(sY, sLon) / Math.max(dia, 1e-9);
+  return (box.min.y + box.max.y) / 2 <= lowY &&
+    round > shape.roundness &&
+    sLat < dia * shape.thinness &&
+    dia > minDia && dia < maxDia;
+}
+
+/**
+ * Adı `nameRe`ye uyan tekerlek düğümlerini gövdeden ayırır ve her birini
+ * geometrik merkezine oturtulmuş temiz bir pivot grubuna koyar.
+ *
+ * `extractWheels` ile BİREBİR aynı sözleşmeyi döndürür — `{ wheels, used }`,
+ * pivotlar model uzayında, `userData` alanları aynı — böylece `buildPrefab`,
+ * `instantiate`, `driveWheels` hattının geri kalanı iki yolu ayırt etmez.
+ *
+ * @param {Array}   parts        { mesh, mats, matrix } kayıtları
+ * @param {THREE.Box3} shell     aracın kabuğu (model uzayı)
+ * @param {'x'|'z'} lateralAxis  aks (dönüş) ekseni
+ * @param {'x'|'z'} lengthAxis   aracın uzun ekseni
+ * @param {RegExp}  nameRe       MODELS[].wheelNodes
+ * @param {object}  shape        WHEEL_SHAPE eşikleri
+ */
+export function extractNamedWheels(parts, shell, lateralAxis, lengthAxis, nameRe, shape = WHEEL_SHAPE) {
+  const size = shell.getSize(new THREE.Vector3());
+  const lat = AXIS[lateralAxis];
+  const lon = AXIS[lengthAxis];
+  const lowY = shell.min.y + size.y * shape.lowFraction;
+  const minDia = size[lengthAxis] * shape.minDiameter;
+  const maxDia = size[lengthAxis] * shape.maxDiameter;
+
+  const wheels = [];
+  const used = new Set();
+  const partBox = new THREE.Box3();
+
+  for (const part of parts) {
+    if (!wheelNamed(part, nameRe)) continue;
+
+    // Ada tek başına güvenilmez: "steering wheel", "wheel arch", "rim trim"
+    // gibi düğümler de kurala uyar. Kaba kutu elemesi, kaportanın üst
+    // yarısında duran her adayı daha geometriyi pişirmeden durdurur.
+    partBox.setFromObject(part.mesh);
+    if (partBox.getCenter(_v).y > lowY) continue;
+
+    const pieces = bakePieces(part);
+    if (!pieces.length) continue;
+
+    const S = triangleSpans(pieces);
+    if (!S.n) { for (const p of pieces) p.geo.dispose(); continue; }
+
+    /* Tek mesh'te birden çok teker olabilir (`rear wheels`). Bir tekerin
+       kendi içinde bu kadar büyük boşluğu olmaz: en büyük iç boşluk ön
+       tekerde 0.006 birim, iki teker arası ise 4.16 birim. Eşik çapın
+       ~%35'i — arada güvenli bir kat var. */
+    const spanLon = partBox.max.getComponent(lon) - partBox.min.getComponent(lon);
+    const gap = Math.max(spanLon, partBox.max.y - partBox.min.y) * 0.35;
+    const cutsLat = emptySlabCuts(S, lat, gap);
+    const cutsLon = emptySlabCuts(S, lon, gap);
+
+    /* Üçgenleri hücrelere dağıt. (Kesim boş aralıktan geçtiği için üçgenin
+       hangi ucuna bakıldığı fark etmez.) */
+    const stride = cutsLon.length + 1;
+    const cells = new Map();
+    for (let i = 0; i < S.n; i++) {
+      const key = cellOf(S.lo[i * 3 + lat], cutsLat) * stride +
+                  cellOf(S.lo[i * 3 + lon], cutsLon);
+      let cell = cells.get(key);
+      if (!cell) { cell = { tris: [], box: new THREE.Box3() }; cells.set(key, cell); }
+      cell.tris.push(i);
+      cell.box.expandByPoint(_v.set(S.lo[i * 3], S.lo[i * 3 + 1], S.lo[i * 3 + 2]));
+      cell.box.expandByPoint(_v.set(S.hi[i * 3], S.hi[i * 3 + 1], S.hi[i * 3 + 2]));
+    }
+
+    /* Kırıntı hücreler (bir vidanın birkaç üçgeni) kendi başına tekerlek
+       sayılmaz; en yakın gerçek hücreye katılır. Atılsalardı lastikte delik
+       kalırdı. */
+    const solid = [];
+    const crumbs = [];
+    for (const cell of cells.values()) {
+      if (cell.tris.length < shape.noiseTris && cell.tris.length < S.n * shape.noiseFraction) {
+        crumbs.push(cell);
+      } else {
+        solid.push(cell);
+      }
+    }
+    for (const crumb of crumbs) {
+      let best = null, bestD = Infinity;
+      const c = crumb.box.getCenter(new THREE.Vector3());
+      for (const cell of solid) {
+        const d = c.distanceToSquared(cell.box.getCenter(_v));
+        if (d < bestD) { bestD = d; best = cell; }
+      }
+      if (!best) { solid.length = 0; break; }     // hepsi kırıntı: aday değil
+      best.tris.push(...crumb.tris);
+      best.box.union(crumb.box);
+    }
+
+    // Hepsi geçmek zorunda: bir hücre tekerleğe benzemiyorsa mesh'in TAMAMI
+    // gövdeye döner — yarısını alıp yarısını bırakmak modelde delik açardı.
+    const ok = solid.length > 0 &&
+      solid.every((cell) => wheelShaped(cell.box, lat, lon, shape, minDia, maxDia, lowY));
+    if (!ok) { for (const p of pieces) p.geo.dispose(); continue; }
+
+    /* Özgün dünya konumu/dönüşü — pivot bunun üstüne kurulur. Dönüş zaten
+       geometriye pişirildiği (adım 2) için gruba TEKRAR uygulanmaz; iki kez
+       sayılırsa teker yamulur. Kayıt yalnızca teşhis içindir. */
+    const srcPos = new THREE.Vector3();
+    const srcQuat = new THREE.Quaternion();
+    part.matrix.decompose(srcPos, srcQuat, new THREE.Vector3());
+
+    for (const cell of solid) {
+      // Pivot: hücrenin KENDİ geometrik merkezi (aracın orta hattı değil).
+      const pivotAt = cell.box.getCenter(new THREE.Vector3());
+      const cellSize = cell.box.getSize(new THREE.Vector3());
+
+      const pivot = new THREE.Group();
+      pivot.position.copy(pivotAt);
+      // Y (direksiyon) DIŞTA, aks ekseni (dönüş) İÇTE kalsın.
+      pivot.rotation.order = 'YXZ';
+
+      // Hücrenin üçgenlerini kaynak parça başına topla.
+      const byPiece = new Map();
+      for (const i of cell.tris) {
+        const pi = S.piece[i];
+        if (!byPiece.has(pi)) byPiece.set(pi, []);
+        byPiece.get(pi).push(S.vert[i]);
+      }
+
+      const geos = [];
+      for (const [pi, starts] of byPiece) {
+        const src = pieces[pi].geo;
+        const n = starts.length * 3;
+        const geo = new THREE.BufferGeometry();
+        for (const name of ['position', 'normal', 'uv']) {
+          const a = src.getAttribute(name);
+          if (!a) continue;
+          const arr = new Float32Array(n * a.itemSize);
+          let w = 0;
+          for (const i of starts) {
+            for (let v = 0; v < 3; v++) {
+              for (let c = 0; c < a.itemSize; c++) arr[w++] = a.getComponent(i + v, c);
+            }
+          }
+          geo.setAttribute(name, new THREE.BufferAttribute(arr, a.itemSize));
+        }
+        geos.push({ geo, material: pieces[pi].material });
+      }
+
+      /* İSTENEN DÜZELTMENİN ÖZÜ: köşe verisi kendi geometrik merkezine
+         kaydırılır, yani mesh'in merkezi (0,0,0)'a oturur. Tek geometrili
+         (olağan) durumda bu doğrudan `geometry.center()`tir; birden çok
+         malzeme varsa hepsi ORTAK merkeze göre kaydırılmak zorunda, yoksa
+         parçalar birbirinden ayrılırdı. */
+      if (geos.length === 1) {
+        geos[0].geo.center();
+      } else {
+        for (const { geo } of geos) geo.translate(-pivotAt.x, -pivotAt.y, -pivotAt.z);
+      }
+
+      for (const { geo, material } of geos) {
+        geo.computeBoundingSphere();
+        const m = new THREE.Mesh(geo, material);
+        m.userData.materialName = material ? material.name : '';
+        pivot.add(m);
+      }
+
+      pivot.userData = {
+        isWheel: true,
+        spinAxis: lateralAxis,
+        radius: Math.max(cellSize.y, cellSize[lengthAxis]) / 2,
+        bottom: cell.box.min.y,
+        lon: pivotAt[lengthAxis],
+        lat: pivotAt[lateralAxis],
+        // Teşhis: pivot bu meshin özgün dünya konumundan ne kadar kaydı?
+        repivot: {
+          from: { x: srcPos.x, y: srcPos.y, z: srcPos.z },
+          to: { x: pivotAt.x, y: pivotAt.y, z: pivotAt.z },
+        },
+      };
+      wheels.push(pivot);
+    }
+
+    // Pivotlar kuruldu: özgün mesh artık gövde birleştirmesine girmez.
+    used.add(part);
+    for (const p of pieces) p.geo.dispose();
+  }
+
+  return { wheels, used };
 }
 
 /**
@@ -526,9 +893,16 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
   const lengthAxis = Math.abs(Math.sin(cfg.faceYaw)) > 0.5 ? 'x' : 'z';
   const lateralAxis = lengthAxis === 'x' ? 'z' : 'x';
 
-  /* 3 — tekerlekleri ayıkla; geri kalanı gövdedir -------------------------- */
+  /* 3 — tekerlekleri ayıkla; geri kalanı gövdedir --------------------------
+     Düğümleri düzgün adlandırılmış modeller (`cfg.wheelNodes`) ada göre
+     ayıklanır: teker mesh'i kendi geometrik merkezine oturtulup temiz bir
+     pivot grubuna alınır. Kural tanımlı DEĞİLSE eski geometrik sezgi
+     çalışır — BMW gibi her malzemesi "..._WHEEL..." adını taşıyan
+     dosyalarda tek doğru yol o. */
   const wheelShape = cfg.wheelShape ? { ...WHEEL_SHAPE, ...cfg.wheelShape } : WHEEL_SHAPE;
-  const { wheels, used } = extractWheels(parts, shell, lateralAxis, lengthAxis, wheelShape);
+  const { wheels, used } = cfg.wheelNodes
+    ? extractNamedWheels(parts, shell, lateralAxis, lengthAxis, cfg.wheelNodes, wheelShape)
+    : extractWheels(parts, shell, lateralAxis, lengthAxis, wheelShape);
   const bodyParts = parts.filter((p) => !used.has(p));
 
   /* 4 — gövdeyi malzeme başına birleştir ---------------------------------- */
@@ -546,24 +920,6 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
     if (!mat || !geo) return;
     if (!groups.has(mat)) groups.set(mat, []);
     groups.get(mat).push(geo);
-  }
-
-  function sliceGeometry(geo, start, count) {
-    if (geo.index) {
-      const cut = geo.clone();
-      cut.clearGroups();
-      cut.setIndex(new THREE.BufferAttribute(geo.index.array.slice(start, start + count), 1));
-      const flat = cut.toNonIndexed();
-      cut.dispose();
-      return flat;
-    }
-    const out = new THREE.BufferGeometry();
-    for (const name of ['position', 'normal', 'uv']) {
-      const a = geo.getAttribute(name);
-      const n = a.itemSize;
-      out.setAttribute(name, new THREE.BufferAttribute(a.array.slice(start * n, (start + count) * n), n));
-    }
-    return out;
   }
 
   for (const { mesh, mats, matrix } of bodyParts) {
@@ -686,6 +1042,14 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
   const centreLon = centre[lengthAxis];
   for (const w of wheels) {
     w.userData.isFront = (w.userData.lon - centreLon) * frontSign > 0;
+    // Direksiyonu SADECE bu bayrak taşır: `driveWheels` ön/arka ayrımını
+    // değil, "kırılacak mı" sorusunu okur (arkadan direksiyonlu bir araç
+    // eklenirse tek satır değişir).
+    w.userData.isSteered = w.userData.isFront;
+    /* Ad: dünya-X'in işareti yanal eksenin faceYaw sonrası yönüne bağlı;
+       aynı hesap `spinSign`de yapıldı. +X = sol (ileri +Z, yukarı +Y). */
+    const side = w.userData.lat == null ? '' : ((w.userData.lat * spinSign) > 0 ? 'L' : 'R');
+    w.name = `wheelPivot_${w.userData.isFront ? 'F' : 'R'}${side}`;
   }
 
   /* 7 — ortak PBR cilası: sRGB dokular, tam anizotropi, ölçülü metal/pürüz -- */
@@ -709,8 +1073,17 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
       `[prefab] ${cfg.url}: ${groups.size} malzeme, ${Math.round(tris / 1000)}k üçgen, ` +
       `${dropped} iç mesh atıldı, ${wheels.length} tekerlek ` +
       `(ön: ${wheels.filter((w) => w.userData.isFront).length}), ` +
-      `uzun eksen ${lengthAxis}, dönüş yönü ${spinSign}`
+      `uzun eksen ${lengthAxis}, dönüş yönü ${spinSign}, ` +
+      `teker yolu: ${cfg.wheelNodes ? 'ada göre (pivot düzeltmeli)' : 'geometrik'}`
     );
+    console.table(wheels.map((w) => ({
+      pivot: w.name,
+      x: +w.position.x.toFixed(3),
+      y: +w.position.y.toFixed(3),
+      z: +w.position.z.toFixed(3),
+      r: +w.userData.radius.toFixed(3),
+      'dönen': w.userData.isSteered ? 'ön (kırılır)' : 'arka',
+    })));
   }
 
   // Orijinal meshlere artık referans yok (gövde birleştirildi, tekerlekler
@@ -857,8 +1230,11 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
     car.add(wheelRoot);
   }
 
+  // Sürüş animasyonunun döndüreceği düğümler: yalnızca pivot GRUPLARI.
   const wheels = [];
-  wheelRoot.traverse((o) => { if (o.userData && o.userData.isWheel) wheels.push(o); });
+  wheelRoot.traverse((o) => {
+    if (!o.isMesh && o.userData && o.userData.isWheel) wheels.push(o);
+  });
 
   addShadow(car, width, length);
   if (tailLamps) addTailLamps(car, length);
@@ -887,9 +1263,50 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
 
 /* ------------------------- tekerlek animasyonu ------------------------- */
 
+/** `o`, `root`un altında mı? (kopan/eskimiş pivot listesini yakalar) */
+function isUnder(root, o) {
+  for (let p = o; p; p = p.parent) if (p === root) return true;
+  return false;
+}
+
 /**
- * Tekerlekleri araç hızıyla ileri döndürür; ön tekerlekler direksiyon
+ * Bir araç örneğinin TEKERLEK PİVOT GRUPLARINI çözer ve `userData.wheels`e
+ * yazar.
+ *
+ * Döndürülen her düğüm, `buildPrefab`in tekerlek başına kurduğu temiz
+ * `THREE.Group` pivotudur — geometrisi `center()` ile kendi merkezine
+ * oturtulmuş, dolayısıyla dönüşü aksın tam üstünden geçer. HAM MESH ASLA
+ * dönmez: doğrudan mesh döndürmek, pivotu modeldeki (çoğu zaman aracın orta
+ * hattındaki) düğüm başlangıcına geri götürüp yalpalamayı geri getirirdi.
+ *
+ * Liste tembel kurulur ve kendini tazeler: garajda araç değişince
+ * (`rebuildCars`) `playerCar` yepyeni bir örnektir, eskisinin pivotları artık
+ * sahnede değildir.
+ *
+ * @param {THREE.Object3D} car  instantiate() çıktısı
+ * @returns {THREE.Object3D[]}  pivot grupları
+ */
+export function bindWheelPivots(car) {
+  if (!car) return [];
+  const u = car.userData || (car.userData = {});
+  if (u.wheels && u.wheels.length && isUnder(car, u.wheels[0])) return u.wheels;
+
+  const found = [];
+  (car.getObjectByName('wheelRoot') || car).traverse((o) => {
+    if (o.isMesh) return;                            // ham mesh aday değil
+    if (o.userData && o.userData.isWheel) found.push(o);
+  });
+  u.wheels = found;
+  return found;
+}
+
+/**
+ * Tekerlek pivotlarını araç hızıyla ileri döndürür; ön pivotlar direksiyon
  * sinyaline göre Y ekseninde hafifçe kırılır.
+ *
+ * Dönüş HER ZAMAN pivot grubuna yazılır, altındaki mesh'e değil — mesh'in
+ * köşe verisi zaten merkeze kaydırıldığı için grup dönünce teker kendi aksı
+ * etrafında döner.
  *
  * @param {THREE.Group} car    instantiate() çıktısı
  * @param {number} speed       m/s cinsinden ileri hız
@@ -897,8 +1314,10 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
  * @param {number} dt          saniye
  */
 export function driveWheels(car, speed, steer, dt) {
-  const u = car.userData;
-  if (!u || !u.wheels || !u.wheels.length) return;
+  const u = car && car.userData;
+  if (!u) return;
+  const wheels = u.wheels && u.wheels.length ? u.wheels : bindWheelPivots(car);
+  if (!wheels.length) return;
 
   // Gerçek açısal hız 82 m/s'de ~250 rad/s eder; 60 fps'de bu Nyquist'in çok
   // ötesinde kalır ve teker geri dönüyormuş gibi görünür. Tavanla sınırlıyoruz.
@@ -906,9 +1325,11 @@ export function driveWheels(car, speed, steer, dt) {
   u.spin = (u.spin + omega * Math.sign(speed || 1) * u.spinSign * dt) % (Math.PI * 2);
 
   const steerAngle = THREE.MathUtils.clamp(steer, -1, 1) * WHEEL.steerMax;
-  for (const w of u.wheels) {
-    w.rotation[w.userData.spinAxis] = u.spin;
-    if (w.userData.isFront) w.rotation.y = steerAngle;
+  for (const w of wheels) {
+    const wu = w.userData;
+    if (!wu || !wu.isWheel) continue;
+    w.rotation[wu.spinAxis || 'x'] = u.spin;
+    if (wu.isSteered ?? wu.isFront) w.rotation.y = steerAngle;
   }
 }
 

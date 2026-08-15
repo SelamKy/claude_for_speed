@@ -184,7 +184,7 @@ export function resetRace() {
     distance: 0, speed: 0, x: laneX(1), lane: 1, targetLane: 1,
     lateral: 0, steer: 0, roll: 0, yaw: 0, pitch: 0,
     crashed: false, finished: false, spin: 0,
-    nitro: 1, boosting: false,
+    nitro: 1, boosting: false, topSpeed: 0,
   };
   G.rival.buffer.length = 0;
   G.rival.distance = 0; G.rival.x = laneX(2); G.rival.lateral = 0; G.rival.steer = 0;
@@ -291,6 +291,9 @@ export function tickPlayer(dt) {
   // Boost bitince hız tavana doğru SÖNER, anında kesilmez.
   if (me.speed > topSpeed) me.speed = Math.max(topSpeed, me.speed - 26 * dt);
   me.speed = THREE.MathUtils.clamp(me.speed, DRIVE.minSpeed, topSpeed);
+
+  // Koşu özeti için: bu yarışta görülen en yüksek hız (m/s).
+  if (me.speed > me.topSpeed) me.topSpeed = me.speed;
 
   const before = me.distance;
   me.distance += me.speed * dt;

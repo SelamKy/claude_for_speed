@@ -273,6 +273,46 @@ export function mergeConfig(patch) {
   return CONFIG;
 }
 
+/* =========================== tek oyunculu mod =========================
+   Tek Oyunculu koşuda sunucu yok: trafiği istemci üretir. Aşağıdaki
+   değerler `server.js`'teki CONFIG'in trafik bölümünün BİREBİR aynısıdır
+   (SPAWN_*, TRAFFIC_SPEED_*, MIN_LANE_GAP, BLOCK_WINDOW, RECYCLE_*,
+   PASSABLE_*), böylece tek kişilik yol, iki kişilik yolla aynı ritimde
+   ve aynı geçilebilirlik garantileriyle akar. Fizik, tavan hız (395 km/s),
+   jetonlar ve 6000 m'lik bitiş `DRIVE` / `CONFIG` üzerinden ORTAKTIR —
+   burada kopyalanmaz.                                                   */
+export const SOLO = {
+  countdownMs: 3000,        // sunucunun COUNTDOWN_MS'i
+  firstSpawnAt: 1400,       // yeşil ışıktan sonraki nezaket payı (yarış ms)
+
+  spawnIntervalMin: 420,
+  spawnIntervalMax: 950,
+  difficultyRampMs: 120000, // aralık bu sürede MIN'e doğru daralır
+  trafficSpeedMin: 16,      // m/s
+  trafficSpeedMax: 30,
+
+  spawnAhead: 340,          // lider aracın kaç metre önünde doğar
+  spawnJitter: 45,
+  trafficColors: 4,
+
+  minLaneGap: 42,           // aynı şeritteki iki araç arası (m)
+  blockWindow: 38,          // bu bantta şerit "kapalı" sayılır
+  minOpenLanes: 2,          // hiçbir zaman bundan azı açık kalmaz
+  maxActive: 26,            // pistte aynı anda yaşayan araç tavanı
+
+  activeWindow: 460,        // liderin önünde "görüş alanı" sayılan mesafe
+  targetActiveMin: 6,       // görüş alanı bu sayının altına düşerse doldur
+  targetActiveMax: 10,
+
+  recycleBehind: 180,       // geride kalan araç bu mesafeden sonra geri dönüştürülür
+  recycleAheadMin: 30,
+  recycleAheadMax: 120,
+
+  passableHorizonMs: 40000, // yol tıkanıklığı kontrolünde ileriye bakış
+  passableStepMs: 700,
+  nominalPlayerSpeed: 55,   // m/s — oyuncu durmuşken varsayılan cephe
+};
+
 export const COLORS = {
   you: 0x22e0ff,
   rival: 0xff3d81,
