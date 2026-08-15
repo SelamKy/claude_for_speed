@@ -280,18 +280,8 @@ async function boot() {
   const atmo = new Atmosphere({ scene, renderer, camera, hemi, key, rim });
   setAtmosphere(atmo);
 
-  /* Sis kilidi. Atmosfer ön ayarları her `_apply()` çağrısında sahneye sis
-     yazar; sis tamamen kapalı olduğu için o yazımı burada geri alıyoruz.
-     Ön ayar sisi çöp üretmeden yazsın diye tek bir "lağım" nesnesi verilir,
-     ardından `scene.fog` yine null'a döner. Arka plan / ufuk rengi ön ayarla
-     güncellenmeye devam eder — kaybolan tek şey sis örtüsü. */
-  const applyAtmosphere = atmo._apply.bind(atmo);
-  const fogSink = new THREE.Fog(0x000000, 1, 2);
-  atmo._apply = () => {
-    scene.fog = fogSink;
-    applyAtmosphere();
-    scene.fog = null;
-  };
+  /* Sis tamamen kaldırıldı; `Atmosphere._apply()` artık `scene.fog`'u null
+     tutuyor. Arka plan / ufuk rengi ön ayarla güncellenmeye devam eder. */
   atmo._apply();
 
   setFx(new Fx(world, el.speedlines));

@@ -628,6 +628,10 @@ export class Fx {
    * @param {number} strength 0..1
    */
   tyreSmoke(car, dt, strength) {
+    // Lastik / hızlanma dumanı kapatıldı. Nitro alevleri ve hız artışı
+    // etkilenmez; fren izleri (laySkid) çizilmeye devam eder.
+    return;
+    /* eslint-disable no-unreachable */
     if (strength <= 0.02) return;
     this._smokeAcc += dt * 90 * strength;
     const n = Math.floor(this._smokeAcc);

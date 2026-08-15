@@ -449,10 +449,9 @@ export class Atmosphere {
     const fogNear = Math.max(FOG_READABILITY.minNear, c.fogNear);
     const fogFar = Math.max(FOG_READABILITY.minFar, c.fogFar, fogNear + 400);
 
-    if (!this.scene.fog) this.scene.fog = new THREE.Fog(c.fog.getHex(), fogNear, fogFar);
-    this.scene.fog.color.copy(c.fog);
-    this.scene.fog.near = fogNear;
-    this.scene.fog.far = fogFar;
+    // Sis kaldırıldı: hiçbir ön ayar `scene.fog` oluşturmaz.
+    this.scene.fog = null;
+    void fogNear; void fogFar;
     if (this.scene.background && this.scene.background.isColor) {
       this.scene.background.copy(c.fog);
     }
