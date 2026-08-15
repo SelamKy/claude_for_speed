@@ -3,10 +3,14 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
-<meta name="theme-color" content="#05070d" />
+<meta name="theme-color" content="#0a0c10" />
 <title>Claude for Speed — Tek &amp; Çok Oyunculu Otoyol Yarışı</title>
 <link rel="icon" type="image/png" href="/favicon.png" />
 <link rel="preconnect" href="https://unpkg.com" />
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Rajdhani:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap" />
 <link rel="stylesheet" href="/style.css" />
 <link rel="preload" as="fetch" href="/models/bmw_m3_competition.glb" crossorigin />
 </head>
@@ -18,9 +22,12 @@
   <div id="speedlines" aria-hidden="true"></div>
   <div id="rainlayer" aria-hidden="true"></div>
 
-  <!-- ============================== YÜKLEME ============================= -->
+  <!-- ============================== YÜKLEME =============================
+       Ortalanmış kutu yok: marka kilidi sol-alt köşeye sabit, ilerleme
+       çubuğu ince bir çizgi. Sahne her zaman görünür kalır.              -->
   <section id="loading" class="screen">
     <div class="loader-box">
+      <span class="eyebrow"><i></i>Sistem başlatılıyor</span>
       <div class="logo">
         <span class="logo-main">CLAUDE</span><span class="logo-accent">FOR SPEED</span>
       </div>
@@ -29,11 +36,15 @@
     </div>
   </section>
 
-  <!-- ================================ LOBİ ============================== -->
+  <!-- ================================ LOBİ ==============================
+       Asimetrik HUD: menü sol kenardaki dikey raya oturur, ekranın geri
+       kalanı 3B araca ve ortama ayrılmıştır. Kart / kutu yok.            -->
   <section id="lobby" class="screen hidden">
-    <div class="panel lobby-panel">
+
+    <div class="lobby-rail lobby-panel">
 
       <header class="lobby-head">
+        <span class="eyebrow"><i></i>Otoyol · 4 şerit · 6000 m</span>
         <div class="logo">
           <span class="logo-main">CLAUDE</span><span class="logo-accent">FOR SPEED</span>
         </div>
@@ -44,18 +55,21 @@
       <div id="lobby-mode" class="lobby-stage">
         <div class="mode-grid">
           <button id="btn-solo" class="btn btn-mode btn-primary">
-            <span class="mode-title"><span class="btn-glyph">▶</span> Tek Oyunculu</span>
+            <span class="mode-index">01</span>
+            <span class="mode-title">Tek Oyunculu</span>
             <span class="mode-sub">Trafiğe karşı 6000 m — beklemeden başla</span>
           </button>
 
           <button id="btn-multi" class="btn btn-mode">
-            <span class="mode-title"><span class="btn-glyph">⚑</span> Çok Oyunculu</span>
+            <span class="mode-index">02</span>
+            <span class="mode-title">Çok Oyunculu</span>
             <span class="mode-sub">Oda kur ya da bir arkadaşının odasına katıl</span>
           </button>
         </div>
 
         <button id="btn-garage" class="btn btn-ghost btn-garage">
-          <span class="btn-glyph">◈</span> Garaj &amp; Dükkân
+          <span class="mode-index">03</span>
+          <span class="mode-title">Garaj &amp; Dükkân</span>
           <em id="lobby-coins" class="wallet-mini">0</em>
         </button>
         <p id="lobby-loadout" class="muted status"></p>
@@ -72,7 +86,7 @@
         <form id="join-form" class="join-row" autocomplete="off">
           <input id="join-code" class="input code-input" maxlength="6" spellcheck="false"
                  placeholder="XYZ123" aria-label="Oda kodu" />
-          <button id="btn-join" type="submit" class="btn">Odaya Katıl</button>
+          <button id="btn-join" type="submit" class="btn">Katıl</button>
         </form>
 
         <button id="btn-back-mode" class="btn btn-link">‹ Mod seçimine dön</button>
@@ -88,11 +102,11 @@
         <div class="invite-row">
           <input id="invite-link" class="input invite-input" readonly aria-label="Davet bağlantısı" />
           <button id="btn-copy" class="btn btn-ghost" title="Davet bağlantısını kopyala">
-            <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
               <path d="M9 9V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-4" />
-              <rect x="3" y="9" width="12" height="12" rx="2" />
+              <rect x="3" y="9" width="12" height="12" rx="1" />
             </svg>
-            <span id="copy-text">Bağlantıyı Kopyala</span>
+            <span id="copy-text">Kopyala</span>
           </button>
         </div>
         <p class="hint">Bu bağlantıyı rakibine gönder — onu doğrudan bu odaya alır.</p>
@@ -107,11 +121,18 @@
         <p id="lobby-status" class="muted status">Rakip Bekleniyor...</p>
       </div>
 
+    </div>
+
+    <!-- --- alt bar: tuş kapakları + künye --- -->
+    <div class="lobby-bar">
       <footer class="controls-legend">
-        <span><kbd>A</kbd><kbd>D</kbd> / <kbd>←</kbd><kbd>→</kbd> şerit değiştir</span>
-        <span><kbd>W</kbd> gaz</span>
-        <span><kbd>S</kbd> fren</span>
-        <span><kbd>SHIFT</kbd> nitro</span>
+        <span class="ctl">
+          <kbd>A</kbd><kbd>D</kbd><span class="ctl-or">/</span><kbd>←</kbd><kbd>→</kbd>
+          <em>Şerit</em>
+        </span>
+        <span class="ctl"><kbd>W</kbd><em>Gaz</em></span>
+        <span class="ctl"><kbd>S</kbd><em>Fren</em></span>
+        <span class="ctl"><kbd class="kbd-wide">SHIFT</kbd><em>Nitro</em></span>
       </footer>
       <p class="credit-line">Geliştirici: Abdülselam Kaya</p>
     </div>
@@ -122,7 +143,7 @@
     <div class="garage-shell">
 
       <header class="garage-head">
-        <button id="garage-back" class="btn btn-ghost">‹ Lobiye Dön</button>
+        <button id="garage-back" class="btn btn-ghost btn-sm">‹ Lobiye Dön</button>
         <div class="logo garage-logo">
           <span class="logo-main">GARAJ</span><span class="logo-accent">&amp; DÜKKÂN</span>
         </div>
@@ -232,6 +253,7 @@
   <!-- ============================= OYUN SONU ============================ -->
   <section id="gameover" class="screen overlay hidden">
     <div class="panel result-panel">
+      <span class="eyebrow"><i></i>Sonuç</span>
       <h2 id="result-title" class="result-title">YARIŞ BİTTİ</h2>
       <p id="result-sub" class="muted"></p>
       <ol id="result-list" class="result-list"></ol>
