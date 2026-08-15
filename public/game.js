@@ -19,9 +19,9 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 
 import { SceneryField, buildBuildingPrefabs, buildFallbackPrefabs } from './js/scenery.js';
-import { Atmosphere, pickEnvironment, FOG_READABILITY } from './js/atmosphere.js';
+import { Atmosphere, pickEnvironment } from './js/atmosphere.js';
 import { Fx } from './js/fx.js';
-import { buildProceduralPrefab, applyLook, makeHeadlights } from './js/vehicles.js';
+import { buildProceduralPrefab, applyLook } from './js/vehicles.js';
 import { GarageScreen } from './js/garage-ui.js';
 import {
   garage, VEHICLE_BY_ID, computeStats, REWARDS,
@@ -412,15 +412,11 @@ renderer.toneMappingExposure = 1.05;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0b1220);
-/* Sis SADECE uzağı yumuşatmak için var; ön planı süte çevirmemeli.
-   `near` (220 m) oyuncunun tepki verdiği bölgeyi tamamen berrak bırakır:
-   yaklaşan trafik 340 m'lik çizim ufkunda bile yalnızca ~%20 soluktur.
-   `far` (820 m) binaların 780 m'deki çizim ufkunun hemen ötesinde kapanır,
-   yani uzak siluetler pop yapmadan sisin içinden çıkar. Renk asfalt ile
-   gece göğünün karışımı — nesneler beyaza patlamak yerine arka plana
-   gömülür. Ortam değişince atmosphere.js bu değerleri devralır ama
-   FOG_READABILITY tabanının altına inemez. */
-scene.fog = new THREE.Fog(0x0b1220, FOG_READABILITY.minNear, FOG_READABILITY.minFar);
+/* Sis tamamen kapalı. Ham, arcade bir görüntü isteniyor: uzak siluetler,
+   ufuk ve arka plan hiçbir mesafede solmaz, çizim ufku ne gösteriyorsa
+   net gösterir. `boot()` içinde atmosfer kurulurken de kilitli tutulur —
+   ortam ön ayarları (gece/yağmur/gün batımı) sisi geri getiremez. */
+scene.fog = null;
 
 const camera = new THREE.PerspectiveCamera(VIEW.fovBase, innerWidth / innerHeight, 0.4, 1400);
 camera.position.set(0, VIEW.camHeight, -VIEW.camBack);
@@ -1338,27 +1334,17 @@ function addShadow(group, w, l) {
   group.add(m);
 }
 
-function addUnderglow(group, color, w, l) {
-  const m = new THREE.Mesh(
-    new THREE.PlaneGeometry(w * 1.9, l * 1.25),
-    new THREE.MeshBasicMaterial({
-      map: shadowTexture, color, transparent: true, opacity: 0.55,
-      blending: THREE.AdditiveBlending, depthWrite: false,
-    })
-  );
-  m.rotation.x = -Math.PI / 2;
-  m.position.y = 0.05;
-  group.add(m);
-}
-
-function addTailGlow(group, l) {
-  const mat = new THREE.MeshBasicMaterial({
-    color: 0xff2a2a, transparent: true, opacity: 0.75,
-    blending: THREE.AdditiveBlending, depthWrite: false, side: THREE.DoubleSide,
-  });
+/**
+ * Stop lambaları — düz, opak kırmızı yüzeyler. Bilerek additive DEĞİL:
+ * eski hâli katmanlandıkça arkadan gelen araçta göz alan bir korona
+ * yaratıyordu. Burada lamba sadece "yanıyor" gibi okunan bir doku.
+ */
+function addTailLamps(group, l) {
+  const mat = new THREE.MeshBasicMaterial({ color: 0xc21f1f });
   for (const side of [-1, 1]) {
     const q = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.16), mat);
     q.position.set(side * 0.62, 0.82, -l / 2 - 0.02);
+    q.rotation.y = Math.PI;          // yüzey geriye baksın (tek taraflı)
     group.add(q);
   }
 }
@@ -1412,12 +1398,10 @@ function makeLowPoly(color, w, h, l) {
  * @param {object} opts
  * @param {number} [opts.paint]
  * @param {object} [opts.look]
- * @param {number} [opts.underglow]  alt neon rengi (yoksa kapalı)
- * @param {boolean} [opts.tailGlow]
+ * @param {boolean} [opts.tailLamps] düz stop lambası yüzeyleri
  * @param {boolean} [opts.lod]
- * @param {boolean} [opts.headlights]
  */
-function instantiate(prefab, { paint, look, underglow, tailGlow, lod = false, headlights = false } = {}) {
+function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}) {
   const { width, height, length, paintRe, rollCentre, liftTable, spinSign, wheelRadius } = prefab.userData;
 
   const src = prefab.clone(true);
@@ -1466,8 +1450,7 @@ function instantiate(prefab, { paint, look, underglow, tailGlow, lod = false, he
   wheelRoot.traverse((o) => { if (o.userData && o.userData.isWheel) wheels.push(o); });
 
   addShadow(car, width, length);
-  if (underglow != null) addUnderglow(car, underglow, width, length);
-  if (tailGlow) addTailGlow(car, length);
+  if (tailLamps) addTailLamps(car, length);
 
   car.userData = {
     width, height, length, rollCentre, liftTable, spinSign, wheelRadius,
@@ -1477,13 +1460,9 @@ function instantiate(prefab, { paint, look, underglow, tailGlow, lod = false, he
   // Garaj görünümü: boya + kaplama + cam filmi + jant tek çağrıda.
   if (look) applyLook(car, look, paintRe);
 
-  if (headlights) {
-    const rig = makeHeadlights(width, length, height);
-    car.add(rig.group);
-    car.userData.headlights = rig;
-    rig.setIntensity(atmosphere ? atmosphere.headlightLevel : 0);
-    if (atmosphere) atmosphere.addHeadlights(rig);
-  }
+  /* Far donanımı bilerek yok: koni demetleri, additive "lens" diskleri ve
+     alt neon (underglow) sökülmüştür. Farlar artık yalnızca modelin kendi
+     malzemesi — ekranı yakan hâle veya nabız gibi atan LED animasyonu yok. */
 
   if (DEBUG) {
     const hw = Math.min(width * 0.5 * 0.86, 1.0);
@@ -1584,7 +1563,7 @@ function spawnTrafficMesh(model, variant) {
   // dönüşünü zaten karşılıyor. (Eskiden burada her karede istisna atılıyordu.)
   if (!prefabs[name]) return null;
 
-  const mesh = instantiate(prefabs[name], { paint: COLORS.traffic[v], tailGlow: true, lod: true });
+  const mesh = instantiate(prefabs[name], { paint: COLORS.traffic[v], tailLamps: true, lod: true });
   mesh.userData.poolKey = key;
   world.add(mesh);
   return mesh;
@@ -1645,15 +1624,13 @@ function applyLoadout() {
 }
 
 /** Garajdaki bir aracın tam donanımlı 3B örneği (garaj önizlemesi de bunu kullanır). */
-function makeCar(vehicleId, look, { lod = false, headlights = true } = {}) {
+function makeCar(vehicleId, look, { lod = false } = {}) {
   const prefab = prefabFor(vehicleId);
   if (!prefab) return null;
   const car = instantiate(prefab, {
     look,
-    underglow: look && look.underglow ? look.underglowColor : undefined,
-    tailGlow: true,
+    tailLamps: true,
     lod,
-    headlights,
   });
   car.userData.vehicleId = vehicleId;
   return car;
@@ -1689,7 +1666,6 @@ function rebuildCars() {
   const keepPlayer = playerCar ? playerCar.position.clone() : null;
   retireCar(playerCar);
   retireCar(rivalCar);
-  if (atmosphere) atmosphere.clearHeadlights();
 
   playerCar = makeCar(garage.selected, garage.look(garage.selected), { lod: false });
   if (playerCar) {
@@ -1803,8 +1779,8 @@ function tickPickups(dt) {
       // Toplama: şerit ve mesafe kutusu — kaza kutusundan cömert.
       if (G.phase === 'racing' && !G.me.crashed && !G.me.finished &&
           Math.abs(z - d) < PICKUP.grabZ && Math.abs(x - G.me.x) < PICKUP.grabX) {
-        G.pickups.set(key, true);
-        collectCoin(x, z);
+        G.pickups.set(key, true);   // bu kareden itibaren çizilmez
+        collectCoin();
         continue;
       }
 
@@ -1822,25 +1798,15 @@ function tickPickups(dt) {
   void dt;
 }
 
-function collectCoin(x, z) {
+/**
+ * Jeton toplama: sayaç artar, o kadar. Parçacık patlaması, ışık halkası,
+ * ekran parlaması yok — jeton `tickPickups()` tarafından bu kareden itibaren
+ * zaten çizilmiyor (toplananlar `G.pickups` üzerinden atlanır), yani mesh
+ * aynı anda sahneden düşer.
+ */
+function collectCoin() {
   G.purse.pickups += REWARDS.perCoinPickup;
   bumpPurse();
-  if (fx) {
-    for (let i = 0; i < 14; i++) {
-      fx.flames.emit({
-        position: { x, y: PICKUP.height, z },
-        velocity: {
-          x: (Math.random() - 0.5) * 6,
-          y: Math.random() * 4 + 1,
-          z: (Math.random() - 0.5) * 6 - 2,
-        },
-        color: 0xffc233,
-        size: 7 + Math.random() * 6,
-        life: 0.35 + Math.random() * 0.25,
-        drag: 3.2, grow: 1.2, gravity: -6, peak: 0.08,
-      });
-    }
-  }
 }
 
 /* ============================== koşu kazancı ========================== */
@@ -2879,11 +2845,8 @@ function bindWorldSystems() {
   });
   if (scenery) scenery.setRoadWidth(roadWidth() / 2 + 2.2);
 
-  // Far donanımları araçlarla birlikte yeniden doğar; listeyi tazele.
+  // Far donanımı kaldırıldı; atmosferin sürecek bir ışık demeti kalmadı.
   atmosphere.clearHeadlights();
-  for (const car of [playerCar, rivalCar]) {
-    if (car && car.userData.headlights) atmosphere.addHeadlights(car.userData.headlights);
-  }
 }
 
 /**
@@ -2983,6 +2946,21 @@ async function boot() {
 
   /* --- alt sistemler --------------------------------------------------- */
   atmosphere = new Atmosphere({ scene, renderer, camera, hemi, key, rim });
+
+  /* Sis kilidi. Atmosfer ön ayarları her `_apply()` çağrısında sahneye sis
+     yazar; sis tamamen kapalı olduğu için o yazımı burada geri alıyoruz.
+     Ön ayar sisi çöp üretmeden yazsın diye tek bir "lağım" nesnesi verilir,
+     ardından `scene.fog` yine null'a döner. Arka plan / ufuk rengi ön ayarla
+     güncellenmeye devam eder — kaybolan tek şey sis örtüsü. */
+  const applyAtmosphere = atmosphere._apply.bind(atmosphere);
+  const fogSink = new THREE.Fog(0x000000, 1, 2);
+  atmosphere._apply = () => {
+    scene.fog = fogSink;
+    applyAtmosphere();
+    scene.fog = null;
+  };
+  atmosphere._apply();
+
   fx = new Fx(world, el.speedlines);
 
   rebuildCars();
@@ -3007,7 +2985,7 @@ async function boot() {
     renderer,
     // Garaj önizlemesi pistteki araçla AYNI kurulum hattını kullanır —
     // orada gördüğün boya, cam filmi ve jant yarışta birebir aynı çıkar.
-    makeCar: (vehicleId, look) => makeCar(vehicleId, look, { lod: false, headlights: false }),
+    makeCar: (vehicleId, look) => makeCar(vehicleId, look, { lod: false }),
     onEnvironmentChange: () => applyEnvironment(),
     onClose: () => {
       closeGarage();
@@ -3089,7 +3067,6 @@ if (DEBUG) {
         return {
           label, vehicle: root.userData.vehicleId, visible: root.visible,
           meshes, tris: Math.round(tris), lods, materials: mats.size,
-          headlights: !!root.userData.headlights,
           wheels: (root.userData.wheels || []).length,
           z: Math.round(root.position.z),
         };

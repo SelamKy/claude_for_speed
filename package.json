@@ -5,7 +5,9 @@
   "main": "server.js",
   "scripts": {
     "test": "node test/traffic.test.js",
-    "start": "node server.js"
+    "start": "node server.js",
+    "test:smoke": "node test/smoke.mjs",
+    "test:e2e": "node test/multiplayer.mjs"
   },
   "keywords": [],
   "author": "",
