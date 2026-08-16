@@ -224,6 +224,34 @@ export function startRacing() {
   show(el.hud, true);
 }
 
+/* ========================== tekerlek sinyalleri ========================
+   Yuvarlanma hızı fizikten türetilir, elle ayarlanmaz. `driveWheels`
+   içindeki bağıntı:
+
+       rollDelta = (ileriHız_m/s * dt) / tekerYarıçapı_m
+
+   Buradan geçen `me.speed` ZATEN m/s'dir (DRIVE.* tablosunun tamamı m/s;
+   HUD'daki km/h yalnızca gösterimde çarpılır), yarıçap da prefabın ölçülmüş
+   gerçek yarıçapıdır. Yani bu iki değerin dışında hiçbir katsayı yok:
+   teker, aracın gerçekten aldığı yol kadar döner.
+
+   DİREKSİYON sinyali ise ham `me.steer` DEĞİL. Araç şerit merkezine
+   oturduğunda yanal hız tam sıfıra inmez; geriye kalan ±0.02'lik artık
+   sinyal düz yolda ön tekerleri sağa sola titretiyordu — "yalpalama"nın
+   göze en çok batan kısmı buydu. Ölü bölge bu artığı keser, kalan aralığı
+   yeniden [0,1]'e gerer ki tam kilit kaybolmasın.
+
+   Gövde yatışını / savrulmasını besleyen `me.steer` DEĞİŞMEZ: temizlik
+   yalnızca tekerleğe giden kopyaya uygulanır, sürüş hissi aynı kalır. */
+const WHEEL_STEER_DEADZONE = 0.04;
+
+function wheelSteer(steer) {
+  const s = THREE.MathUtils.clamp(steer, -1, 1);
+  const mag = Math.abs(s);
+  if (mag <= WHEEL_STEER_DEADZONE) return 0;
+  return Math.sign(s) * (mag - WHEEL_STEER_DEADZONE) / (1 - WHEEL_STEER_DEADZONE);
+}
+
 /* ============================== oyuncu tick ============================ */
 
 export function tickPlayer(dt) {
@@ -241,7 +269,7 @@ export function tickPlayer(dt) {
       playerCar.position.set(me.x, 0, me.distance);
       playerCar.rotation.y = me.yaw;
       poseBody(playerCar, me.roll, me.pitch);
-      driveWheels(playerCar, me.speed, me.steer, dt);
+      driveWheels(playerCar, me.speed, wheelSteer(me.steer), dt);
     }
     return;
   }
@@ -340,7 +368,8 @@ export function tickPlayer(dt) {
     playerCar.position.set(me.x, 0, me.distance);
     playerCar.rotation.y = me.yaw;
     poseBody(playerCar, me.roll, me.pitch);
-    driveWheels(playerCar, me.speed, me.steer, dt);
+    // Yuvarlanma m/s'den, kırılma temizlenmiş sinyalden — ikisi de driveWheels'te.
+    driveWheels(playerCar, me.speed, wheelSteer(me.steer), dt);
   }
 
   emitDrivingFx(dt);

@@ -113,6 +113,28 @@ export const WHEEL_SHAPE = {
   noiseFraction: 0.02,
 };
 
+/**
+ * Düğümleri düzgün adlandırılmış modellerde tekerlek adı kuralı.
+ *
+ * Ada göre ayıklama (`extractNamedWheels`) geometrik sezgiden daima daha
+ * güvenlidir — teker KENDİ sınırından ayrılır, aracın orta hattından değil —
+ * ama yalnızca adlandırma güvenilirse. Bu yüzden kural MODEL BAŞINA açılır:
+ * BMW'de her malzeme "..._WHEEL..." adını taşıdığı için ada bakan bir kural
+ * taban sacını da teker sanardı; o model geometrik yolda kalır.
+ *
+ * `ilkaraba.glb` düğümleri ölçüldü: `front right wheel`, `front left wheel`,
+ * `rear wheels` (İKİ tekeri tek mesh'te taşır). Üçü de `wheel` malzemesini
+ * kullanır ve bu adı başka hiçbir düğüm/malzeme taşımaz — yani kural tam
+ * dört tekerleği alır, gövdeden hiçbir şey almaz.
+ */
+const WHEEL_NODE_RE =
+  /(^|[\s_.\-])(wheels?|rims?|tyres?|tires?|[LR][FR]W)([\s_.\-]|$)/i;
+
+/** Model anahtarı -> teker düğümü kuralı. `MODELS[].wheelNodes` bunu ezer. */
+export const WHEEL_NODES = {
+  ilkaraba: WHEEL_NODE_RE,
+};
+
 /** Eksen adı -> bileşen indeksi. */
 const AXIS = { x: 0, y: 1, z: 2 };
 const _v = new THREE.Vector3();
@@ -346,7 +368,9 @@ export function extractWheels(parts, shell, lateralAxis, lengthAxis, shape = WHE
     pivot.userData = {
       isWheel: true,
       spinAxis: lateralAxis,
-      radius: Math.max(qSize.y, qSize[lengthAxis]) / 2,
+      // Ada göre ayıklamayla aynı sözleşme: yuvarlanma yarıçapı = aks
+      // yüksekliği eksi temas noktası (bkz. `extractNamedWheels`).
+      radius: Math.max(pivotAt.y - box.min.y, qSize[lengthAxis] / 2),
       bottom: box.min.y,
       lon: pivotAt[lengthAxis],
       lat: pivotAt[lateralAxis],
@@ -674,14 +698,21 @@ export function extractNamedWheels(parts, shell, lateralAxis, lengthAxis, nameRe
       pivot.userData = {
         isWheel: true,
         spinAxis: lateralAxis,
-        radius: Math.max(cellSize.y, cellSize[lengthAxis]) / 2,
+        /* YUVARLANMA YARIÇAPI = aks yüksekliği eksi temas noktası, kutunun
+           yarısı DEĞİL. İkisi yuvarlak bir tekerde birbirine eşittir; lastiğin
+           sırtında en ufak bir çıkıntı varsa kutu yarıçapı büyür ve teker
+           gerçekte aldığı yoldan yavaş dönerdi (kayma hissi). */
+        radius: Math.max(pivotAt.y - cell.box.min.y, cellSize[lengthAxis] / 2),
         bottom: cell.box.min.y,
         lon: pivotAt[lengthAxis],
         lat: pivotAt[lateralAxis],
-        // Teşhis: pivot bu meshin özgün dünya konumundan ne kadar kaydı?
+        /* Özgün dünya konumu/dönüşü — hem teşhis hem de "pivot ne kadar
+           kaydı" ölçüsü. Dönüş geometriye zaten pişirildiği için buradaki
+           quaternion gruba UYGULANMAZ; iki kez sayılırsa teker yamulur. */
         repivot: {
           from: { x: srcPos.x, y: srcPos.y, z: srcPos.z },
           to: { x: pivotAt.x, y: pivotAt.y, z: pivotAt.z },
+          quat: { x: srcQuat.x, y: srcQuat.y, z: srcQuat.z, w: srcQuat.w },
         },
       };
       wheels.push(pivot);
@@ -900,9 +931,18 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
      çalışır — BMW gibi her malzemesi "..._WHEEL..." adını taşıyan
      dosyalarda tek doğru yol o. */
   const wheelShape = cfg.wheelShape ? { ...WHEEL_SHAPE, ...cfg.wheelShape } : WHEEL_SHAPE;
-  const { wheels, used } = cfg.wheelNodes
-    ? extractNamedWheels(parts, shell, lateralAxis, lengthAxis, cfg.wheelNodes, wheelShape)
+  const wheelNodes = cfg.wheelNodes || WHEEL_NODES[cfg.key] || null;
+  let { wheels, used } = wheelNodes
+    ? extractNamedWheels(parts, shell, lateralAxis, lengthAxis, wheelNodes, wheelShape)
     : extractWheels(parts, shell, lateralAxis, lengthAxis, wheelShape);
+  /* Ada göre yol dört tekeri bulamadıysa (model yeniden dışa aktarılmış,
+     düğümler yeniden adlandırılmış) geometrik sezgiye düş: tekersiz bir
+     araçtan iyidir. */
+  if (wheelNodes && wheels.length < 4) {
+    if (DEBUG) console.warn(`[prefab] ${cfg.url}: ada göre ${wheels.length} teker bulundu, geometrik sezgiye düşülüyor`);
+    for (const w of wheels) w.traverse((o) => { if (o.isMesh) o.geometry.dispose(); });
+    ({ wheels, used } = extractWheels(parts, shell, lateralAxis, lengthAxis, wheelShape));
+  }
   const bodyParts = parts.filter((p) => !used.has(p));
 
   /* 4 — gövdeyi malzeme başına birleştir ---------------------------------- */
@@ -987,6 +1027,25 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
     ? Math.min(...wheels.map((w) => w.userData.bottom))   // model uzayında mutlak
     : bb.min.y;
 
+  /* Dört teker aynı yükseklikte MODELLENMEMİŞ olabilir: `ilkaraba.glb`de arka
+     tekerlerin dibi ön tekerlerden 0.060 birim yukarıda duruyor. Zemin en
+     alçak tekere göre ayarlandığı için arka lastikler asfaltın ~1.9 cm
+     üstünde havada kalıyor, araç arkadan kalkıkmış gibi görünüyordu.
+     Her pivotu KENDİ temas noktasına indirerek dördü de yola otursun.
+     Fark yarıçapın %20'sini aşarsa dokunma: o kadar sapan bir parça büyük
+     ihtimalle yanlış tespit edilmiş bir gövde parçasıdır, onu yere çakmak
+     mevcut hâlinden daha kötü görünür. */
+  for (const w of wheels) {
+    const wu = w.userData;
+    const drop = wu.bottom - groundY;
+    if (drop > 1e-6 && drop < wu.radius * 0.20) {
+      w.position.y -= drop;
+      wu.bottom = groundY;
+      // `radius` aksın KENDİ temas noktasına uzaklığı; öteleme onu değiştirmez.
+      if (DEBUG) console.log(`[prefab] ${cfg.url}: teker (lat ${wu.lat?.toFixed(2)}, lon ${wu.lon?.toFixed(2)}) ${drop.toFixed(4)} birim indirildi — asfalta oturdu`);
+    }
+  }
+
   const offset = new THREE.Vector3(
     -((bb.min.x + bb.max.x) / 2) * scale,
     -groundY * scale,
@@ -1049,7 +1108,9 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
     /* Ad: dünya-X'in işareti yanal eksenin faceYaw sonrası yönüne bağlı;
        aynı hesap `spinSign`de yapıldı. +X = sol (ileri +Z, yukarı +Y). */
     const side = w.userData.lat == null ? '' : ((w.userData.lat * spinSign) > 0 ? 'L' : 'R');
-    w.name = `wheelPivot_${w.userData.isFront ? 'F' : 'R'}${side}`;
+    w.userData.side = side;
+    w.userData.corner = `${w.userData.isFront ? 'F' : 'R'}${side}`;
+    w.name = `wheelPivot_${w.userData.corner}`;
   }
 
   /* 7 — ortak PBR cilası: sRGB dokular, tam anizotropi, ölçülü metal/pürüz -- */
@@ -1063,8 +1124,11 @@ export function buildPrefab(gltf, cfg, { dropInterior = true } = {}) {
     liftTable,
     spinSign,
     paintRe: cfg.paint,
+    /* Sürüş yarıçapı ÖN tekerden okunur (varsa): kamera onları görür ve
+       çoğu modelde arka teker birkaç santim farklıdır — dördün ortalaması
+       hiçbirine uymayan bir hızda döndürürdü. */
     wheelRadius: wheels.length
-      ? (wheels.reduce((s, w) => s + w.userData.radius, 0) / wheels.length) * scale
+      ? (wheels.find((w) => w.userData.isFront) || wheels[0]).userData.radius * scale
       : 0.33,
   };
 
@@ -1235,13 +1299,17 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
   wheelRoot.traverse((o) => {
     if (!o.isMesh && o.userData && o.userData.isWheel) wheels.push(o);
   });
+  // Ön (kırılır + yuvarlanır) / arka (sadece yuvarlanır) ayrımı BİR KEZ
+  // burada çözülür; `driveWheels` her karede bayrak sınamaz.
+  const frontWheels = wheels.filter((w) => w.userData.isSteered ?? w.userData.isFront);
+  const rearWheels = wheels.filter((w) => !(w.userData.isSteered ?? w.userData.isFront));
 
   addShadow(car, width, length);
   if (tailLamps) addTailLamps(car, length);
 
   car.userData = {
     width, height, length, rollCentre, liftTable, spinSign, wheelRadius,
-    bodyPivot, wheels, spin: 0,
+    bodyPivot, wheels, frontWheels, rearWheels, spin: 0,
   };
 
   // Garaj görünümü: boya + kaplama + cam filmi + jant tek çağrıda.
@@ -1297,8 +1365,36 @@ export function bindWheelPivots(car) {
     if (o.userData && o.userData.isWheel) found.push(o);
   });
   u.wheels = found;
+  // Ön/arka listeleri de tazelenir — yoksa garajda araç değişince eski
+  // örneğin pivotlarına yazmaya devam ederdik (yeni araç dönmezdi).
+  u.frontWheels = found.filter((w) => w.userData.isSteered ?? w.userData.isFront);
+  u.rearWheels = found.filter((w) => !(w.userData.isSteered ?? w.userData.isFront));
   return found;
 }
+
+/* Dönüş HER ZAMAN quaternion olarak kurulur, Euler bileşeni yazılarak değil.
+   `rotation.x = spin; rotation.y = steer` yazmak, düğümün `rotation.order`
+   alanına güvenmek demektir — klonlama, bir tween ya da dışarıdan tek satır
+   onu 'XYZ'ye çevirdiği anda direksiyon açısı yuvarlanmanın İÇİNE girer ve
+   teker dönerken yalpalar. Eksen açı çiftlerini elle çarpınca sıra sözleşmenin
+   parçası olur: önce dikey eksende kırılma, sonra aksta yuvarlanma. */
+const _AXES = {
+  x: new THREE.Vector3(1, 0, 0),
+  y: new THREE.Vector3(0, 1, 0),
+  z: new THREE.Vector3(0, 0, 1),
+};
+const _qSteer = new THREE.Quaternion();
+const _qRoll = new THREE.Quaternion();
+
+/** Direksiyonun görsel tavanı — hangi modelde olursa olsun aşılamaz. */
+const STEER_CEILING = THREE.MathUtils.degToRad(30);
+
+/* Bir karede GÖSTERİLEBİLECEK en büyük dönüş adımı. 60 fps'de 395 km/h'ta
+   gerçek açısal hız ~229 rad/s, yani kare başına 3.8 tam tur eder: ekranda
+   teker ya durur ya geri döner (araba tekeri / strobe etkisi). Tavan, beş
+   kollu bir jantın simetri açısının (72°) yarısının altında tutulur ki
+   hangi kare hızında olursak olalım dönüş yönü doğru okunsun. */
+const MAX_SPIN_STEP = THREE.MathUtils.degToRad(30);
 
 /**
  * Tekerlek pivotlarını araç hızıyla ileri döndürür; ön pivotlar direksiyon
@@ -1315,21 +1411,72 @@ export function bindWheelPivots(car) {
  */
 export function driveWheels(car, speed, steer, dt) {
   const u = car && car.userData;
-  if (!u) return;
+  if (!u || !(dt > 0)) return;
   const wheels = u.wheels && u.wheels.length ? u.wheels : bindWheelPivots(car);
   if (!wheels.length) return;
 
-  // Gerçek açısal hız 82 m/s'de ~250 rad/s eder; 60 fps'de bu Nyquist'in çok
-  // ötesinde kalır ve teker geri dönüyormuş gibi görünür. Tavanla sınırlıyoruz.
-  const omega = Math.min(Math.abs(speed) / Math.max(u.wheelRadius, 0.15), WHEEL.maxOmega);
-  u.spin = (u.spin + omega * Math.sign(speed || 1) * u.spinSign * dt) % (Math.PI * 2);
+  /* --- yuvarlanma ------------------------------------------------------
+     Fiziğin verdiği tek doğru cevap: kat edilen yay / yarıçap.
+         rollDelta = (hız * dt) / yarıçap
+     `wheelRadius` metre cinsinden GERÇEK yarıçaptır (aks -> temas noktası,
+     prefab ölçeğiyle çarpılmış), yani burada hiçbir sihirli katsayı yok. */
+  const radius = Math.max(u.wheelRadius || 0, 0.15);
+  const rollDelta = (speed * dt) / radius;
 
-  const steerAngle = THREE.MathUtils.clamp(steer, -1, 1) * WHEEL.steerMax;
+  /* Ekranın gösterebileceğinden hızlı dönemeyiz: kare başına adım yarım
+     jant simetrisini geçerse teker durur ya da geriye döner. Sert kesme
+     yerine YUMUŞAK DİZ (soft knee):
+       • dizin altında (tavanın %60'ı — ~32 km/h'a kadar) formül BİREBİR
+         uygulanır, tek derece kayıp yok,
+       • üstünde tanh ile doyar, tavanı asla aşmaz — strobe biter,
+       • doyum bölgesinde bile MONOTON: hızlandıkça teker hâlâ hızlanıyor
+         görünür. (Eski sert tavan 56 km/h üstünde her hızı birebir aynı
+         gösteriyordu; "aşırı hızlı ama gaza tepkisiz" hissinin kaynağı
+         buydu — göz, dönüşü araç hızından kopuk okuyunca yalpalama
+         olarak algılıyor.)
+     Tavan, saniyelik (config: WHEEL.maxOmega) ve karelik (MAX_SPIN_STEP)
+     sınırların küçüğüdür; ikincisi düşük kare hızında da güvende tutar. */
+  const cap = Math.min(WHEEL.maxOmega * dt, MAX_SPIN_STEP);
+  const knee = cap * 0.6;
+  const mag = Math.abs(rollDelta);
+  const shaped = mag <= knee
+    ? mag
+    : knee + (cap - knee) * Math.tanh((mag - knee) / (cap - knee));
+  const step = shaped * Math.sign(rollDelta || 1);
+
+  u.spin = (u.spin + step * u.spinSign) % (Math.PI * 2);
+
+  /* --- direksiyon -------------------------------------------------------
+     Sinyal önce [-1,1]'e, sonra açı tavanına kırpılır. İki kademe de gerekli:
+     ilki modelin kendi kilidini (`WHEEL.steerMax`) ölçekler, ikincisi hiçbir
+     ayarın tekeri çamurluğun içine sokamayacağını garanti eder. */
+  const steerAngle = THREE.MathUtils.clamp(
+    THREE.MathUtils.clamp(steer, -1, 1) * WHEEL.steerMax,
+    -STEER_CEILING, STEER_CEILING
+  );
+
+  const axis = _AXES[wheels[0].userData.spinAxis] || _AXES.x;
+  _qRoll.setFromAxisAngle(axis, u.spin);
+  _qSteer.setFromAxisAngle(_AXES.y, steerAngle);
+
+  const front = u.frontWheels;
+  const rear = u.rearWheels;
+  if (front && rear && front.length + rear.length === wheels.length) {
+    // Ön: dikey eksende kırıl, SONRA aksta yuvarlan.
+    for (const w of front) w.quaternion.copy(_qSteer).multiply(_qRoll);
+    // Arka: sadece yuvarlanma — tek bir yaw/roll bileşeni bile sızmaz.
+    for (const w of rear) w.quaternion.copy(_qRoll);
+    return;
+  }
+
+  // Listeler henüz kurulmamışsa (elle üretilmiş vekil araç) bayrakla çalış.
   for (const w of wheels) {
     const wu = w.userData;
     if (!wu || !wu.isWheel) continue;
-    w.rotation[wu.spinAxis || 'x'] = u.spin;
-    if (wu.isSteered ?? wu.isFront) w.rotation.y = steerAngle;
+    const a = _AXES[wu.spinAxis] || _AXES.x;
+    _qRoll.setFromAxisAngle(a, u.spin);
+    if (wu.isSteered ?? wu.isFront) w.quaternion.copy(_qSteer).multiply(_qRoll);
+    else w.quaternion.copy(_qRoll);
   }
 }
 
