@@ -58,8 +58,33 @@ export let assetsReady = null;
    bunları düz `let` olarak tutuyordu; ES modüllerinde dışa aktarılan bağlar
    salt okunur olduğu için atama burada kalır, okuma canlı bağla aynı kalır. */
 export function setBarKeys(keys) { barKeys = keys; }
-export function setTrafficReady(p) { trafficReady = p; }
 export function setAssetsReady(p) { assetsReady = p; }
+
+/* Trafik modelleri indiği ANDA çalışması gereken işler (havuz ön tahsisi,
+   GPU ön ısıtma) buraya kaydolur. Kanca burada duruyor çünkü `trafikReady`
+   söz nesnesini yazan tek yer burası; böylece `traffic.js` kendi ön ısıtmasını
+   `main.js`'e bir satır bile eklemeden kurabiliyor ve modül grafiği tek yönlü
+   kalıyor (traffic -> loader, ters yönde bağ yok). */
+const readyHooks = new Set();
+
+function runReadyHooks() {
+  for (const fn of [...readyHooks]) {
+    readyHooks.delete(fn);
+    try { fn(); } catch (err) { console.warn('[loader] varlık kancası hata verdi', err); }
+  }
+}
+
+/** Trafik varlıkları hazır olduğunda (ya da zaten hazırsa hemen) `fn`i çağırır. */
+export function onAssetsReady(fn) {
+  if (typeof fn !== 'function') return;
+  readyHooks.add(fn);
+  if (trafficReady) trafficReady.then(runReadyHooks);
+}
+
+export function setTrafficReady(p) {
+  trafficReady = p;
+  if (p && typeof p.then === 'function') p.then(runReadyHooks);
+}
 
 let barQueued = false;
 export function paintLoadBar() {
@@ -1172,14 +1197,33 @@ const shadowTexture = (() => {
   return t;
 })();
 
+/* Gölge lekesi PAYLAŞILIR. Eskiden her araç örneği için yeni bir
+   PlaneGeometry + yeni bir MeshBasicMaterial üretiliyordu; trafik aracı
+   yarışın ortasında doğduğunda bu, o karede yeni bir GPU tamponu ve yeni
+   bir malzeme kaydı demekti — takılmanın küçük ama ölçülebilir bir parçası.
+   Aynı ölçüdeki bütün araçlar artık tek geometriyi ve tek malzemeyi
+   paylaşır (leke zaten araç başına farklı görünmüyordu). */
+const shadowGeometries = new Map();
+const shadowMaterial = new THREE.MeshBasicMaterial({
+  name: 'contactShadow',
+  map: shadowTexture, transparent: true, depthWrite: false, opacity: 0.85,
+});
+
 function addShadow(group, w, l) {
-  const m = new THREE.Mesh(
-    new THREE.PlaneGeometry(w * 2.1, l * 1.5),
-    new THREE.MeshBasicMaterial({ map: shadowTexture, transparent: true, depthWrite: false, opacity: 0.85 })
-  );
+  const key = `${w.toFixed(2)}|${l.toFixed(2)}`;
+  let geo = shadowGeometries.get(key);
+  if (!geo) {
+    geo = new THREE.PlaneGeometry(w * 2.1, l * 1.5);
+    shadowGeometries.set(key, geo);
+  }
+  const m = new THREE.Mesh(geo, shadowMaterial);
   m.rotation.x = -Math.PI / 2;
   m.position.y = 0.02;
+  // Leke gölgenin KENDİSİdir; gölge haritasına girmesi anlamsız olurdu.
+  m.castShadow = false;
+  m.receiveShadow = false;
   group.add(m);
+  return m;
 }
 
 /**
@@ -1187,12 +1231,17 @@ function addShadow(group, w, l) {
  * eski hâli katmanlandıkça arkadan gelen araçta göz alan bir korona
  * yaratıyordu. Burada lamba sadece "yanıyor" gibi okunan bir doku.
  */
+const tailLampMaterial = new THREE.MeshBasicMaterial({ name: 'tailLamp', color: 0xc21f1f });
+const tailLampGeometry = new THREE.PlaneGeometry(0.55, 0.16);
+
 function addTailLamps(group, l) {
-  const mat = new THREE.MeshBasicMaterial({ color: 0xc21f1f });
   for (const side of [-1, 1]) {
-    const q = new THREE.Mesh(new THREE.PlaneGeometry(0.55, 0.16), mat);
+    // Geometri ve malzeme bütün araçlarda ortak: lambalar zaten aynı.
+    const q = new THREE.Mesh(tailLampGeometry, tailLampMaterial);
     q.position.set(side * 0.62, 0.82, -l / 2 - 0.02);
     q.rotation.y = Math.PI;          // yüzey geriye baksın (tek taraflı)
+    q.castShadow = false;
+    q.receiveShadow = false;
     group.add(q);
   }
 }
@@ -1219,7 +1268,11 @@ function makeLowPoly(color, w, h, l) {
     g.add(m);
     return m;
   };
-  add(new THREE.BoxGeometry(w * 0.94, h * 0.46, l * 0.98), body, 0, h * 0.30, 0);
+  // Kaporta kutusu işaretlenir: havuzdaki araç yeniden boyanınca UZAK
+  // vekilin de rengi değişsin. LOD_SWAP 70 m, görüş ufku 340 m — yani
+  // trafiğin çoğu zaten bu vekille çiziliyor; rengi kaçırmak göze batardı.
+  add(new THREE.BoxGeometry(w * 0.94, h * 0.46, l * 0.98), body, 0, h * 0.30, 0)
+    .userData.isLowPolyBody = true;
   add(new THREE.BoxGeometry(w * 0.80, h * 0.40, l * 0.44), dark, 0, h * 0.70, -l * 0.06);
   for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
     add(new THREE.BoxGeometry(w * 0.10, h * 0.30, h * 0.30), dark,
@@ -1231,6 +1284,58 @@ function makeLowPoly(color, w, h, l) {
 
   lowPolyCache.set(cacheKey, g);
   return g.clone(true);
+}
+
+/* --- paylaşılan trafik boyası ------------------------------------------
+ *
+ * Trafik aracının kaportası tek bir düz renkle boyanır. Eski yol her örnek
+ * için `material.clone()` çağırıyordu: 20 araçlık bir trafikte 20 ayrı
+ * malzeme nesnesi, 20 ayrı `WebGLProgram` arama/kurulum yolu ve — daha
+ * kötüsü — araç YARIŞIN ORTASINDA doğduğunda o karede yapılan bir malzeme
+ * kurulumu demekti.
+ *
+ * Artık (temel malzeme × renk) başına TEK malzeme üretilir ve bütün örnekler
+ * onu paylaşır. Renk bir uniform olduğu için shader programı zaten aynıydı;
+ * paylaşım, ilk çizimdeki kurulum maliyetini de tamamen ortadan kaldırır ve
+ * yarış başlamadan derlenebilmelerini sağlar (bkz. `scene.js` → `prewarm`).
+ */
+const paintVariants = new Map();          // temel malzeme uuid -> Map(renk -> malzeme)
+
+function sharedPaint(base, color) {
+  let byColor = paintVariants.get(base.uuid);
+  if (!byColor) { byColor = new Map(); paintVariants.set(base.uuid, byColor); }
+  let mat = byColor.get(color);
+  if (!mat) {
+    mat = base.clone();
+    mat.name = `${base.name || 'paint'}#${(color >>> 0).toString(16)}`;
+    mat.color = new THREE.Color(color);
+    mat.metalness = Math.max(base.metalness ?? 0, 0.55);
+    mat.roughness = Math.min(base.roughness ?? 1, 0.28);
+    if ('clearcoat' in mat) mat.clearcoat = 1;
+    byColor.set(color, mat);
+  }
+  return mat;
+}
+
+/**
+ * Havuzdan alınan bir aracı yeniden boyar — YENİ malzeme üretmeden.
+ *
+ * Havuz model başına tutulur, renk varyantı ise sunucudan gelir; aynı mesh
+ * bu yüzden ömrü boyunca birkaç renk arasında gidip gelir. Renk değişimi
+ * `sharedPaint` önbelleğinden hazır malzemeyi takmaktan ibarettir, yani
+ * tahsis de shader derlemesi de yoktur.
+ *
+ * @param {THREE.Object3D} car    instantiate() çıktısı
+ * @param {number} color          0xRRGGBB
+ */
+export function setCarPaint(car, color) {
+  const meshes = car && car.userData && car.userData.paintMeshes;
+  if (!meshes || !meshes.length) return;
+  for (const o of meshes) {
+    const base = o.userData.basePaint;
+    if (!base) continue;
+    o.material = sharedPaint(base, color);
+  }
 }
 
 /**
@@ -1248,8 +1353,12 @@ function makeLowPoly(color, w, h, l) {
  * @param {object} [opts.look]
  * @param {boolean} [opts.tailLamps] düz stop lambası yüzeyleri
  * @param {boolean} [opts.lod]
+ * @param {boolean} [opts.shadows]    gölge haritası bayrakları (trafikte false)
+ * @param {boolean} [opts.sharePaint] boya malzemesini örnekler arasında paylaş
  */
-export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}) {
+export function instantiate(prefab, {
+  paint, look, tailLamps, lod = false, shadows = true, sharePaint = false,
+} = {}) {
   const { width, height, length, paintRe, rollCentre, liftTable, spinSign, wheelRadius } = prefab.userData;
 
   const src = prefab.clone(true);
@@ -1257,16 +1366,27 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
   const wheelRoot = src.getObjectByName('wheelRoot');
 
   // Boya sadece kaportaya uygulanır — jantlar ve diskler kendi rengini korur.
+  const paintMeshes = [];
   if (paint != null && paintRe) {
     bodyPivot.traverse((o) => {
       if (!o.isMesh) return;
       if (!paintRe.test(o.userData.materialName || o.material.name || '')) return;
-      o.material = o.material.clone();
-      o.material.color = new THREE.Color(paint);
-      o.material.metalness = Math.max(o.material.metalness ?? 0, 0.55);
-      o.material.roughness = Math.min(o.material.roughness ?? 1, 0.28);
-      if ('clearcoat' in o.material) o.material.clearcoat = 1;
-      o.userData.__owned = true;
+      paintMeshes.push(o);
+      // Temel (boyanmamış) malzeme saklanır: her yeniden boyama ondan türer,
+      // yoksa renkler üst üste binerek kayardı.
+      o.userData.basePaint = o.material;
+      if (sharePaint) {
+        // Paylaşılan malzeme: `__owned` İŞARETLENMEZ, çünkü nesne bu
+        // malzemenin sahibi değil — `retireCar()` onu bırakmamalı.
+        o.material = sharedPaint(o.material, paint);
+      } else {
+        o.material = o.material.clone();
+        o.material.color = new THREE.Color(paint);
+        o.material.metalness = Math.max(o.material.metalness ?? 0, 0.55);
+        o.material.roughness = Math.min(o.material.roughness ?? 1, 0.28);
+        if ('clearcoat' in o.material) o.material.clearcoat = 1;
+        o.userData.__owned = true;
+      }
     });
   }
 
@@ -1280,8 +1400,19 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
 
     const levels = new THREE.LOD();
     levels.addLevel(bodyNorm, 0);
-    const low = makeLowPoly(paint ?? 0x9aa3b2, width, height, length);
+    /* Paylaşımlı boyada vekil NÖTR kurulur: `lowPolyCache` böylece renk
+       başına değil, gövde ölçüsü başına tek takım tutar (3 model = 3 takım,
+       12 yerine). Renk `setCarPaint` ile takılır. */
+    const low = makeLowPoly(sharePaint ? 0x9aa3b2 : (paint ?? 0x9aa3b2), width, height, length);
     low.position.y = -rollCentre;   // vekil lastikleri y = 0'a göre çizilir
+    if (sharePaint && paint != null) {
+      low.traverse((o) => {
+        if (!o.isMesh || !o.userData.isLowPolyBody) return;
+        o.userData.basePaint = o.material;
+        o.material = sharedPaint(o.material, paint);
+        paintMeshes.push(o);
+      });
+    }
     levels.addLevel(low, LOD_SWAP);
     levels.addLevel(new THREE.Object3D(), LOD_CULL);
     bodyPivot.add(levels);
@@ -1307,9 +1438,23 @@ export function instantiate(prefab, { paint, look, tailLamps, lod = false } = {}
   addShadow(car, width, length);
   if (tailLamps) addTailLamps(car, length);
 
+  /* Trafik gölge HARİTASINA hiç girmez: `renderer.shadowMap` zaten kapalı,
+     ama bayraklar açık kalırsa ileride açıldığı gün 20 araç bir anda gölge
+     geçişine katılır. Temas lekesi (`addShadow`) görsel karşılığını zaten
+     bedavaya veriyor. */
+  if (!shadows) {
+    car.traverse((o) => {
+      if (!o.isMesh) return;
+      o.castShadow = false;
+      o.receiveShadow = false;
+    });
+  }
+
   car.userData = {
     width, height, length, rollCentre, liftTable, spinSign, wheelRadius,
     bodyPivot, wheels, frontWheels, rearWheels, spin: 0,
+    // Havuzdan alınan aracı yeniden boyamak için (bkz. `setCarPaint`).
+    paintMeshes,
   };
 
   // Garaj görünümü: boya + kaplama + cam filmi + jant tek çağrıda.

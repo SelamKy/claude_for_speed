@@ -82,6 +82,64 @@ addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
 });
 
+/* ============================ GPU ön ısıtma ============================
+   Bir malzeme sahneye girdikten sonra İLK ÇİZİLDİĞİ karede iki pahalı iş
+   yapılır: shader programı derlenir (sürücüye göre 5-40 ms) ve dokuları
+   GPU'ya yüklenir (2K bir PBR seti için onlarca ms). Trafik aracı yarışın
+   ortasında doğduğu için bu maliyet doğrudan kare süresine biniyordu —
+   "trafik doğunca takılma" tam olarak buydu.
+
+   Ön ısıtma ikisini de yarış başlamadan, yükleme ekranındayken yaptırır.
+   Havuzdaki araçlar `visible = false` olsa bile ısınır: `renderer.compile`
+   malzemeleri `traverse` ile toplar, `traverseVisible` ile değil. */
+const TEXTURE_SLOTS = [
+  'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'aoMap', 'emissiveMap',
+  'alphaMap', 'bumpMap', 'displacementMap', 'lightMap', 'specularMap', 'envMap',
+  'clearcoatMap', 'clearcoatNormalMap', 'clearcoatRoughnessMap',
+  'sheenColorMap', 'sheenRoughnessMap', 'iridescenceMap', 'transmissionMap',
+];
+
+/**
+ * `root` altındaki her malzemenin dokularını yükler ve shader programlarını
+ * derler. Işık / ortam / sis durumu HER ZAMAN gerçek sahneden okunur, yani
+ * derlenen program yarışta kullanılacak programın birebir aynısıdır.
+ *
+ * @param {THREE.Object3D} [root]  ısıtılacak alt ağaç (öntanımlı: tüm sahne)
+ * @returns {Promise<void>}        programlar kullanıma hazır olduğunda çözülür
+ */
+export function prewarm(root = scene) {
+  // Dünya matrisleri güncel olmazsa derleme sırasında düğümler atlanabilir.
+  scene.updateMatrixWorld(true);
+
+  const seen = new Set();
+  root.traverse((o) => {
+    if (!o.material) return;
+    const mats = Array.isArray(o.material) ? o.material : [o.material];
+    for (const m of mats) {
+      if (!m || seen.has(m)) continue;
+      seen.add(m);
+      for (const slot of TEXTURE_SLOTS) {
+        const tex = m[slot];
+        if (!tex || !tex.isTexture) continue;
+        // Tek tek sarmalanır: bozuk/boş bir doku bütün ısıtmayı düşürmesin.
+        try { renderer.initTexture(tex); } catch (err) { /* yoksay */ }
+      }
+    }
+  });
+
+  try {
+    if (typeof renderer.compileAsync === 'function') {
+      // Ana iş parçacığını kilitlemez; KHR_parallel_shader_compile varsa
+      // sürücü programları gerçekten paralel derler.
+      return Promise.resolve(renderer.compileAsync(root, camera, scene));
+    }
+    renderer.compile(root, camera, scene);
+  } catch (err) {
+    console.warn('[sahne] ön ısıtma tamamlanamadı', err);
+  }
+  return Promise.resolve();
+}
+
 /* ================================= yol ================================= */
 
 export const world = new THREE.Group();
