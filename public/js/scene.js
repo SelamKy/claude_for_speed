@@ -210,8 +210,14 @@ export function buildRoad() {
   road.markings = makeMarkingTexture();
   road.markings.repeat.set(1, len / 20);
 
+  /* `envMapIntensity` BİLEREK 1'in altında: sahnenin IBL'i stüdyo kutusu
+     (RoomEnvironment) ve tavanı beyaz. Yol yatay bir düzlem olduğu için
+     yüksek bir şiddet, o beyaz tavanı aracın altında göz alan bir ışık
+     havuzu olarak yansıtıyordu. Yolu aydınlatma işi hemisphere + directional
+     ışıkların; IBL yalnızca hafif bir ortam katkısı veriyor.
+     (Atmosfer ön ayarları da aynı sabiti yazar — bkz. atmosphere.js.) */
   const surfaceMat = new THREE.MeshStandardMaterial({
-    map: road.markings, roughness: 0.92, metalness: 0.0, envMapIntensity: 1,
+    map: road.markings, roughness: 0.92, metalness: 0.0, envMapIntensity: 0.6,
   });
   road.surface = new THREE.Mesh(new THREE.PlaneGeometry(w, len, 1, 1), surfaceMat);
   road.surface.rotation.x = -Math.PI / 2;
@@ -318,9 +324,6 @@ export function bindWorldSystems() {
     roadWidth: roadWidth(),
   });
   if (scenery) scenery.setRoadWidth(roadWidth() / 2 + 2.2);
-
-  // Far donanımı kaldırıldı; atmosferin sürecek bir ışık demeti kalmadı.
-  atmosphere.clearHeadlights();
 }
 
 /** Ortamı seç ve uygula. 'auto' ise yarış tohumundan türetilir. */

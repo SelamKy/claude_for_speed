@@ -379,46 +379,9 @@ export function applyLook(car, look, paintRe) {
   }
 }
 
-/* ============================ far demetleri ========================== */
-
-/**
- * Gece / yağmur için far konisi + zemin lekesi. Gerçek SpotLight yerine
- * additive geometri: 20 araçta bile bedava ve gölge hesabı gerektirmez.
- *
- * @returns {{group:THREE.Group, setIntensity:(k:number)=>void}}
- */
-export function makeHeadlights(width, length, height) {
-  const group = new THREE.Group();
-  group.name = 'headlights';
-
-  const beamMat = new THREE.MeshBasicMaterial({
-    color: 0xfff0cf, transparent: true, opacity: 0, depthWrite: false,
-    blending: THREE.AdditiveBlending, side: THREE.DoubleSide,
-  });
-  const coreMat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0, depthWrite: false,
-    blending: THREE.AdditiveBlending,
-  });
-
-  for (const sx of [-1, 1]) {
-    // Koni: uçtan tabana doğru açılan far demeti.
-    const beam = new THREE.Mesh(new THREE.ConeGeometry(1.5, 15, 10, 1, true), beamMat);
-    beam.rotation.x = Math.PI / 2;             // ekseni +Z'ye çevir
-    beam.position.set(sx * width * 0.3, height * 0.42, length * 0.5 + 7.4);
-    beam.scale.set(1, 1, 0.42);                // yassı, yola serilen demet
-    group.add(beam);
-
-    const core = new THREE.Mesh(new THREE.CircleGeometry(width * 0.13, 10), coreMat);
-    core.position.set(sx * width * 0.3, height * 0.42, length * 0.5 + 0.03);
-    group.add(core);
-  }
-
-  return {
-    group,
-    setIntensity(k) {
-      beamMat.opacity = 0.16 * k;
-      coreMat.opacity = 0.95 * k;
-      group.visible = k > 0.01;
-    },
-  };
-}
+/* Far demetleri KALDIRILDI.
+   `makeHeadlights()` additive bir koni (sahte ışık düzlemi) ve pürüzsüz
+   beyaz bir `CircleGeometry` diski (opacity 0.95) kuruyordu. İkisi de
+   aracın altında/önünde göz alan beyaz bir leke bırakıyordu; artık
+   aydınlatma yalnızca sahnedeki hemisphere + directional ışıklardan ve
+   modelin kendi malzemesinden geliyor. */

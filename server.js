@@ -12,6 +12,7 @@
  */
 
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
@@ -124,7 +125,83 @@ const app = express();
 app.disable('x-powered-by');
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
-app.use(express.static(PUBLIC_DIR, { maxAge: '1h', extensions: ['html'] }));
+
+/* MIME haritası AÇIKÇA yazılır. Modül girişleri (`type="module"`) ve
+   `fetch`lenen .glb'ler yanlış Content-Type ile gelirse tarayıcı katı MIME
+   denetiminde ikisini de reddeder — üretimde (Linux + ters vekil) bu, yerelde
+   hiç görülmeyen bir "boş ekran" hatasıdır. */
+const MIME = {
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.glb': 'model/gltf-binary',
+  '.gltf': 'model/gltf+json',
+  '.wasm': 'application/wasm',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.ktx2': 'image/ktx2',
+  '.bin': 'application/octet-stream',
+};
+
+app.use(express.static(PUBLIC_DIR, {
+  maxAge: '1h',
+  extensions: ['html'],
+  redirect: false,
+  setHeaders(res, filePath) {
+    const type = MIME[path.extname(filePath).toLowerCase()];
+    if (type) res.setHeader('Content-Type', type);
+    // Modeller içerik-adresli değil; tarayıcı önbelleği tazelik sorsun.
+    if (filePath.endsWith('.glb') || filePath.endsWith('.gltf')) {
+      res.setHeader('Cache-Control', 'public, max-age=3600');
+      res.setHeader('Accept-Ranges', 'bytes');
+    }
+  },
+}));
+
+/* ---- Linux büyük/küçük harf denetimi ---------------------------------
+   Windows ve macOS dosya adlarında harf durumuna bakmaz; Linux bakar. Bir
+   varlık `Ilkaraba.glb` olarak diske yazılıp koda `ilkaraba.glb` diye
+   girildiyse yerelde çalışır, sunucuda 404 verir. Açılışta dosya adlarını
+   koddaki yollarla BİREBİR karşılaştırıp uyuşmazlıkları yazdırıyoruz. */
+function auditPublicAssets() {
+  const configPath = path.join(PUBLIC_DIR, 'js', 'config.js');
+  let referenced = [];
+  try {
+    const src = fs.readFileSync(configPath, 'utf8');
+    referenced = [...src.matchAll(/url:\s*'(\/models\/[^']+)'/g)].map((m) => m[1]);
+  } catch {
+    log('[varlık denetimi] public/js/config.js okunamadı, atlanıyor');
+    return;
+  }
+
+  const problems = [];
+  for (const url of new Set(referenced)) {
+    const rel = url.replace(/^\//, '');
+    const abs = path.join(PUBLIC_DIR, rel);
+    if (fs.existsSync(abs)) continue;                 // birebir eşleşme: tamam
+    const dir = path.dirname(abs);
+    const want = path.basename(abs);
+    let hint = 'dosya yok';
+    try {
+      const near = fs.readdirSync(dir)
+        .find((f) => f.toLowerCase() === want.toLowerCase());
+      if (near) hint = `diskte '${near}' var — harf durumu uyuşmuyor`;
+    } catch { /* klasör de yok */ }
+    problems.push(`  ${url}  ->  ${hint}`);
+  }
+
+  if (problems.length) {
+    log(`[varlık denetimi] ${problems.length} yol Linux'ta ÇÖZÜLMEZ:`);
+    for (const p of problems) log(p);
+  } else {
+    log(`[varlık denetimi] ${new Set(referenced).size} model yolu birebir eşleşti`);
+  }
+}
 
 app.get('/healthz', (_req, res) => {
   res.json({ ok: true, rooms: rooms.size, uptime: process.uptime() });
@@ -142,6 +219,14 @@ app.get('/api/room/:code', (req, res) => {
     joinable: room.players.size < CONFIG.MAX_PLAYERS && room.phase === 'waiting',
     phase: room.phase,
   });
+});
+
+/* Kök servis: `/`, `/?room=XYZ123` ve varlık olmayan her GET istemciyi
+   döndürür. Varlık isteği (uzantılı yol) ve /api,/socket.io elenir ki eksik
+   bir .glb sessizce index.html almasın — 404 olarak görünsün. */
+app.get(/^\/(?!api\/|socket\.io\/|healthz).*/, (req, res, next) => {
+  if (path.extname(req.path)) return next();
+  res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
 });
 
 const server = http.createServer(app);
@@ -816,6 +901,7 @@ const sweeper = setInterval(() => {
 
 server.listen(CONFIG.PORT, () => {
   log(`Claude for Speed server listening on http://localhost:${CONFIG.PORT}`);
+  auditPublicAssets();
 });
 
 function shutdown(signal) {

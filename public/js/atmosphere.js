@@ -31,6 +31,13 @@ import * as THREE from 'three';
  */
 export const FOG_READABILITY = { minNear: 220, minFar: 820 };
 
+/* Yolun IBL'den (RoomEnvironment) aldığı yansıma şiddeti — SABİT.
+   Eskiden `1 + wetSheen * 1.4` ile 2.4'e kadar çıkıyordu; ıslak ön ayarda
+   bu, stüdyo tavanının aracın altında beyaz bir havuz olarak yansıması
+   demekti. Sabit ve ölçülü bir değer, yolu aydınlatma işini hemisphere +
+   directional ışıklara bırakır. */
+const ROAD_ENV_INTENSITY = 0.6;
+
 /** @typedef {keyof typeof PRESETS} EnvId */
 export const PRESETS = {
   day: {
@@ -44,7 +51,6 @@ export const PRESETS = {
     roadTint: 0xffffff, roadRough: 0.94, roadMetal: 0.02,
     barrierTint: 0xffffff,
     glow: 0.0, headlights: 0.0, streetLamp: 0.0, stars: 0.0, rain: 0.0,
-    wetSheen: 0.0,
   },
   sunset: {
     name: 'Gün Batımı',
@@ -57,7 +63,6 @@ export const PRESETS = {
     roadTint: 0xffd0a8, roadRough: 0.82, roadMetal: 0.12,
     barrierTint: 0xffd7b0,
     glow: 0.22, headlights: 0.35, streetLamp: 0.35, stars: 0.06, rain: 0.0,
-    wetSheen: 0.0,
   },
   night: {
     name: 'Gece',
@@ -70,7 +75,6 @@ export const PRESETS = {
     roadTint: 0x515c70, roadRough: 0.80, roadMetal: 0.16,
     barrierTint: 0x9fb2d0,
     glow: 1.0, headlights: 1.0, streetLamp: 1.0, stars: 1.0, rain: 0.0,
-    wetSheen: 0.0,
   },
   rain: {
     name: 'Yağmur',
@@ -80,10 +84,12 @@ export const PRESETS = {
     keyColor: 0xa9bdd6, keyIntensity: 0.45, keyPos: [-30, 100, 20],
     rimColor: 0x5fd0ff, rimIntensity: 0.45,
     exposure: 1.05,
-    roadTint: 0x3d4854, roadRough: 0.14, roadMetal: 0.62,
+    /* Islak asfalt PÜRÜZLÜ kalır. Eski değerler (rough 0.14 / metal 0.62)
+       yolu ayna yapıyordu: stüdyo IBL'i (RoomEnvironment) aracın altında
+       ekranı yakan beyaz bir havuz olarak yansıyordu. */
+    roadTint: 0x3d4854, roadRough: 0.55, roadMetal: 0.22,
     barrierTint: 0xb8ccdf,
     glow: 0.72, headlights: 1.0, streetLamp: 0.9, stars: 0.0, rain: 1.0,
-    wetSheen: 1.0,
   },
 };
 
@@ -142,7 +148,7 @@ function snapshot(preset) {
     roadRough: preset.roadRough, roadMetal: preset.roadMetal,
     barrierTint: new THREE.Color(preset.barrierTint),
     glow: preset.glow, headlights: preset.headlights, streetLamp: preset.streetLamp,
-    stars: preset.stars, rain: preset.rain, wetSheen: preset.wetSheen,
+    stars: preset.stars, rain: preset.rain,
   };
 }
 
@@ -159,7 +165,7 @@ function blend(out, from, to, k) {
   out.keyPos.copy(from.keyPos).lerp(to.keyPos, k);
   for (const key of ['fogNear', 'fogFar', 'hemiIntensity', 'keyIntensity', 'rimIntensity',
     'exposure', 'roadRough', 'roadMetal', 'glow', 'headlights', 'streetLamp',
-    'stars', 'rain', 'wetSheen']) {
+    'stars', 'rain']) {
     out[key] = lerp(from[key], to[key], k);
   }
   return out;
@@ -271,40 +277,6 @@ function makeRain() {
   return { points, mat, positions: pos };
 }
 
-/** Islak yolda kayan ışık yansımaları — additive, tek düzlem. */
-function makeWetSheen() {
-  const c = document.createElement('canvas');
-  c.width = 128; c.height = 256;
-  const g = c.getContext('2d');
-  g.fillStyle = '#000'; g.fillRect(0, 0, 128, 256);
-  for (let i = 0; i < 46; i++) {
-    const x = Math.random() * 128;
-    const y = Math.random() * 256;
-    const h = 14 + Math.random() * 60;
-    const grd = g.createLinearGradient(0, y, 0, y + h);
-    const a = 0.10 + Math.random() * 0.30;
-    grd.addColorStop(0, 'rgba(255,255,255,0)');
-    grd.addColorStop(0.5, `rgba(255,255,255,${a})`);
-    grd.addColorStop(1, 'rgba(255,255,255,0)');
-    g.fillStyle = grd;
-    g.fillRect(x, y, 1.5 + Math.random() * 3, h);
-  }
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.colorSpace = THREE.SRGBColorSpace;
-
-  const mat = new THREE.MeshBasicMaterial({
-    map: tex, color: 0x9fd4ff, transparent: true, opacity: 0,
-    blending: THREE.AdditiveBlending, depthWrite: false,
-  });
-  const mesh = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), mat);
-  mesh.rotation.x = -Math.PI / 2;
-  mesh.position.y = 0.03;
-  mesh.frustumCulled = false;
-  mesh.renderOrder = 2;
-  return { mesh, mat, tex };
-}
-
 /* ============================== atmosfer ============================== */
 
 export class Atmosphere {
@@ -335,18 +307,15 @@ export class Atmosphere {
     this.sky = makeSky();
     this.stars = makeStars();
     this.rain = makeRain();
-    this.sheen = makeWetSheen();
 
-    scene.add(this.sky.mesh, this.stars.points, this.rain.points, this.sheen.mesh);
+    scene.add(this.sky.mesh, this.stars.points, this.rain.points);
 
     /** Bağlanan dış nesneler — `bind()` ile doldurulur. */
     this.roadMaterials = [];
     this.barrierMaterials = [];
     this.lampMaterials = [];
     this.scenery = null;
-    this.headlightRigs = [];
 
-    this._rainPhase = 0;
     this._apply();
   }
 
@@ -359,13 +328,9 @@ export class Atmosphere {
     if (barrierMaterials) this.barrierMaterials = barrierMaterials;
     if (lampMaterials) this.lampMaterials = lampMaterials;
     if (scenery !== undefined) this.scenery = scenery;
-    if (roadWidth) this.sheen.mesh.scale.set(roadWidth + 6, 320, 1);
+    void roadWidth;                    // ıslak parlaklık düzlemi kaldırıldı
     this._apply();
   }
-
-  /** Far donanımı ekle/çıkar (oyuncu, rakip, trafik). */
-  addHeadlights(rig) { if (rig) this.headlightRigs.push(rig); }
-  clearHeadlights() { this.headlightRigs.length = 0; }
 
   /** @param {EnvId} id */
   set(id, immediate = false) {
@@ -425,18 +390,12 @@ export class Atmosphere {
       this.rain.points.visible = false;
     }
 
-    /* --- ıslak asfalt yansımaları ------------------------------------- */
-    if (this._cur.wetSheen > 0.02) {
-      this.sheen.mesh.visible = true;
-      this.sheen.mesh.position.z = distance + 110;
-      this.sheen.tex.offset.y = (-distance / 46) % 1;
-      this._rainPhase = (this._rainPhase + dt * 0.6) % 1;
-      this.sheen.tex.offset.x = this._rainPhase;
-    } else {
-      this.sheen.mesh.visible = false;
-    }
-
-    for (const rig of this.headlightRigs) rig.setIntensity(this._cur.headlights);
+    /* Islak yol artık YALNIZCA malzemeden okunur (roadRough / roadMetal).
+       Yola serilen additive beyaz düzlem ve far demetleri sökülmüştür:
+       ikisi de aracın altında göz alan bir ışık lekesi bırakıyordu.
+       `distance` imzada kalır — çağıranlar (solo/network döngüsü) onu
+       geçmeye devam ediyor, atmosferin artık kaydıracağı bir doku yok. */
+    void distance;
   }
 
   /** Anlık değerleri sahneye yazar. */
@@ -477,7 +436,7 @@ export class Atmosphere {
       tint(m, c.roadTint);
       if ('roughness' in m) m.roughness = c.roadRough;
       if ('metalness' in m) m.metalness = c.roadMetal;
-      if ('envMapIntensity' in m) m.envMapIntensity = 1 + c.wetSheen * 1.4;
+      if ('envMapIntensity' in m) m.envMapIntensity = ROAD_ENV_INTENSITY;
     }
     for (const m of this.barrierMaterials) tint(m, c.barrierTint);
     for (const m of this.lampMaterials) {
@@ -489,7 +448,6 @@ export class Atmosphere {
     this.stars.mat.opacity = c.stars;
     this.stars.points.visible = c.stars > 0.02;
     this.rain.mat.opacity = 0.42 * c.rain;
-    this.sheen.mat.opacity = 0.55 * c.wetSheen;
 
     if (this.scenery) this.scenery.setNightGlow(c.glow);
 
@@ -499,7 +457,7 @@ export class Atmosphere {
   }
 
   dispose() {
-    for (const obj of [this.sky.mesh, this.stars.points, this.rain.points, this.sheen.mesh]) {
+    for (const obj of [this.sky.mesh, this.stars.points, this.rain.points]) {
       this.scene.remove(obj);
       obj.geometry.dispose();
       obj.material.dispose();
